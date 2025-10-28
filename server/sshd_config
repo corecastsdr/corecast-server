@@ -1,0 +1,34 @@
+# A minimal and secure sshd_config for the Corecast/CCRX server
+
+Port 2222
+
+# Global settings: Disable password auth by default for security.
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+PermitEmptyPasswords no
+
+# Standard settings
+PubkeyAuthentication yes
+AllowTcpForwarding yes
+HostKey /app/host_keys/ssh_host_rsa_key
+HostKey /app/host_keys/ssh_host_ed25519_key
+LogLevel VERBOSE
+
+# Disable unnecessary features globally
+X11Forwarding no
+AllowAgentForwarding no
+
+
+# --- THIS IS THE MAGIC ---
+# This block applies special rules ONLY to the 'corecast-host' user.
+Match User corecast-host
+    # Re-enable password authentication ONLY for this user.
+    PasswordAuthentication yes
+
+    # Force any connection attempt to run /bin/false.
+    # This prevents shell access and command execution but allows the tunnel to establish.
+    ForceCommand /bin/false
+
+    # Prevent allocation of an interactive terminal.
+    PermitTTY no

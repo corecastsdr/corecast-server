@@ -1,0 +1,42 @@
+# docker-compose.yml
+
+services:
+  sdr-control:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: evanparden/corecast:corecast-server
+    container_name: corecast-server
+    # network_mode: "host"
+
+    restart: unless-stopped
+
+    ports:
+      - "2222:2222"
+      - "3050:3050"
+      - "3051:3051"
+
+    # This is the change. We are now using a "bind mount".
+    # This links the ./ssh_keys folder from your computer into the container.
+
+
+    volumes:
+      - ./ssh_keys:/etc/ssh
+      - ./proxychains.conf:/app/proxychains.conf:ro
+
+    environment:
+      SDR_REMOTE: "127.0.0.1:55132"
+      # REMOTE_PROT: "tcp"
+      REMOTE_TIMEOUT_MS: "100000"
+      CENTER: "104100000"
+      SPAN_RATE: "1024000"
+      FFT_SIZE: "2048"
+      AUD_RATE: "48000"
+      GAIN_DB: "20"
+      CHUNK_MS: "20"
+      SOAPY_SDR_LOG_LEVEL: "INFO"
+      PYTHONPATH: /usr/lib/python3/dist-packages
+      LD_LIBRARY_PATH: /usr/lib
+
+      REMOTE_MTU: "1280"
+

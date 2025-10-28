@@ -1,0 +1,12 @@
+# /sshd_config
+Port 22
+ListenAddress 0.0.0.0
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+PermitTunnel yes
+AllowTcpForwarding yes
+GatewayPorts yes
+X11Forwarding no
+PrintMotd no
+Subsystem sftp /usr/lib/openssh/sftp-server
