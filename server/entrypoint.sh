@@ -1,29 +1,70 @@
 #!/bin/bash
+#
+# Core Cast Server - Entrypoint
+#
+# This script performs the following critical boot sequence:
+# 1. Starts the custom SSH server in the background.
+# 2. Waits for the remote SDR host to connect and establish its
+#    reverse SSH tunnel.
+# 3. Once the tunnel is detected (by polling the port), it
+#    executes the main Python application.
+#
+
+# Exit immediately if a command exits with a non-zero status.
 set -e
 
-echo "✅ Preparing to start SSH server in SUPER DEBUG MODE..."
-echo " ownership of /etc/ssh:"
-ls -la /etc/ssh/host_keys
+# --- 1. Start SSH Server ---
+echo "✅ Preparing to start SSH server..."
 
-echo " permissions of /etc/ssh:"
-ls -la /etc/ssh/
+# Verify our custom config and keys exist
+if [ ! -f /app/sshd_config ]; then
+    echo "❌ FATAL: /app/sshd_config not found!"
+    exit 1
+fi
+if [ ! -f /app/host_keys/ssh_host_rsa_key ]; then
+    echo "❌ FATAL: /app/host_keys/ssh_host_rsa_key not found!"
+    exit 1
+fi
 
-echo "🔥 Starting SSH server in foreground with max verbosity..."
+echo "   Found custom config: /app/sshd_config"
+echo "   Found host keys in: /app/host_keys"
+echo "   DEBUG: Listing host keys:"
+ls -la /app/host_keys
 
-# This command runs the server in the foreground (-D) with maximum debugging (-ddd)
-# It will print every check it performs and the exact reason if it fails.
-exec /usr/sbin/sshd -D -f /app/sshd_config &
+# Start the SSH daemon in the background
+echo "🔥 Starting SSH server in background..."
+/usr/sbin/sshd -D -e -f /app/sshd_config &
 
-echo "✅ SSH service is running."
-echo "⏳ Waiting for the remote SOCKS proxy tunnel to be established on port 8080..."
+echo "✅ SSH server started. Awaiting connection from SDR host..."
 
-# This loop uses netcat (nc) to check if port 8080 is open on localhost.
-# It will wait here forever until the remote SDR machine connects and creates the proxy.
-while ! nc -z 127.0.0.1 8080; do
+# --- 2. Wait for Reverse Tunnel ---
+
+# Get the host and port from SDR_REMOTE (e.g., "127.0.0.1:55132")
+if [ -z "$SDR_REMOTE" ]; then
+    echo "❌ FATAL: SDR_REMOTE environment variable is not set!"
+    exit 1
+fi
+
+# Parse the variable to get the host and port
+SDR_HOST=${SDR_REMOTE%:*}
+SDR_PORT=${SDR_REMOTE##*:}
+
+echo "⏳ Waiting for reverse tunnel to be established on $SDR_HOST:$SDR_PORT..."
+echo "   (This requires the remote SDR host to connect to this server via SSH)"
+
+# Loop using netcat (nc) to check if the port is open.
+# The 'netcat-traditional' package (from Dockerfile) supports '-z'.
+while ! nc -z "$SDR_HOST" "$SDR_PORT"; do
   sleep 1 # wait 1 second before checking again
 done
 
-echo "✅ SOCKS proxy tunnel is active! Handing off to main Python application..."
+echo "✅ Reverse tunnel is active! Handing off to main Python application..."
 
-# Now that the tunnel is confirmed to be active, we execute the app through it.
-exec proxychains4 -f /app/proxychains.conf python3 /app/main.py
+# --- 3. Start Main Application ---
+#
+# Now that the tunnel is confirmed, we execute the app.
+# We use 'exec' to replace this script with the python process,
+# ensuring it becomes PID 1 and receives signals correctly.
+#
+echo "🚀 Starting Core Cast main.py..."
+exec python3 /app/main.py
