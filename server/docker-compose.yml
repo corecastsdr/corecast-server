@@ -11,6 +11,7 @@ services:
 
     restart: unless-stopped
 
+
     ports:
       - "2222:2222"
       - "3050:3050"
@@ -19,13 +20,20 @@ services:
     # This is the change. We are now using a "bind mount".
     # This links the ./ssh_keys folder from your computer into the container.
 
+    security_opt:
+      - "apparmor:unconfined"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 
     volumes:
-      - ./ssh_keys:/etc/ssh
+      # - ./ssh_keys:/app/host_keys
       - ./proxychains.conf:/app/proxychains.conf:ro
+      - ./sshd_config:/app/sshd_config:ro
 
     environment:
-      SDR_REMOTE: "127.0.0.1:55132"
+      SDR_REMOTE: "192.168.1.115:55132"
       # REMOTE_PROT: "tcp"
       REMOTE_TIMEOUT_MS: "100000"
       CENTER: "104100000"

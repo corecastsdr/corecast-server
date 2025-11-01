@@ -60,32 +60,4 @@ fi
 
 echo "✅ File sync complete."
 
-# --- Step 2: Build and Restart Server ---
-echo "---"
-echo " remotely building and restarting the container on $SERVER_IP..."
-echo "   (You will be prompted for your password again for the remote commands...)"
-echo "---"
 
-# This command is executed on the remote server via SSH.
-# It changes to the project directory, builds the new image,
-# and restarts the service in detached mode.
-SSH_COMMAND="cd $PROJECT_DIR_REMOTE && \
-    cd ./server && \
-    echo '  Building Docker image...' && \
-    sudo docker-compose build && \
-    echo '  Restarting Docker container...' && \
-    sudo docker-compose up -d --force-recreate && \
-    echo '  Pruning old Docker images...' && \
-    sudo docker image prune -f && \
-    echo '---' && \
-    echo '✅ Deployment successful!' && \
-    sudo docker-compose ps"
-
-# We remove the '-i "$SERVER_SSH_KEY"' part to allow
-# ssh to use password authentication.
-ssh "$SERVER_USER@$SERVER_IP" "$SSH_COMMAND"
-
-if [ $? -ne 0 ]; then
-    echo "❌ Remote SSH command failed."
-    exit 1
-fi

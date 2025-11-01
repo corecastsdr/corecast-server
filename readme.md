@@ -115,3 +115,31 @@ docker compose up -d
 
 ```
 ```
+
+```bash
+sudo docker-compose up --build -d
+
+sudo docker-compose logs -f
+
+sudo docker ps -a --filter name=corecast-server --format '{{.ID}}' | xargs -r sudo docker rm -f
+sudo docker rm -f corecast-server 2>/dev/null || true
+sudo docker-compose down
+
+sudo docker-compose up --build -d
+
+sudo docker-compose up --build
+
+sudo docker-compose up --force-recreate --build -d
+
+
+
+sudo docker logs -f --tail=100 corecast-server
+
+
+
+sudo chmod +x ./start.sh
+
+sudo ./start.sh
+
+
+```
