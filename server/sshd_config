@@ -26,9 +26,9 @@ Match User corecast-host
     # Re-enable password authentication ONLY for this user.
     PasswordAuthentication yes
 
-    # Force any connection attempt to run /bin/false.
-    # This prevents shell access and command execution but allows the tunnel to establish.
-    ForceCommand /bin/false
+    # Force any connection attempt to run our dynamic IP script.
+    # This allows the tunnel AND lets us grab the host's IP.
+    ForceCommand /app/handle_connection.sh
 
     # Prevent allocation of an interactive terminal.
     PermitTTY no

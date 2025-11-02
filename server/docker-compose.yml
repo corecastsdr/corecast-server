@@ -29,15 +29,15 @@ services:
 
     volumes:
       # - ./ssh_keys:/app/host_keys
-      - ./proxychains.conf:/app/proxychains.conf:ro
+      # - ./proxychains.conf:/app/proxychains.conf:ro
       - ./sshd_config:/app/sshd_config:ro
 
     environment:
-      SDR_REMOTE: "192.168.1.115:55132"
+      SDR_REMOTE: "127.0.0.1:55132"
       # REMOTE_PROT: "tcp"
       REMOTE_TIMEOUT_MS: "100000"
       CENTER: "104100000"
-      SPAN_RATE: "1024000"
+      SPAN_RATE: "2048000"
       FFT_SIZE: "2048"
       AUD_RATE: "48000"
       GAIN_DB: "20"

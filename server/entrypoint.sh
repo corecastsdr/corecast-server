@@ -1,18 +1,20 @@
 #!/bin/bash
 #
-# Core Cast Server - Entrypoint (SOCKS Proxy Version)
+# Core Cast Server - Entrypoint (Dynamic Handshake Version)
 #
-# 1. Starts the custom SSH server in the background.
-# 2. Waits for the remote SDR host to connect and establish its
-#    DYNAMIC SOCKS proxy tunnel on port 8080.
-# 3. Once the proxy is detected, it executes the main Python
-#    application *through* proxychains.
+# 1. Performs pre-flight checks for SSH config and keys.
+# 2. Starts the custom SSH server in the background.
+# 3. Waits for the remote SDR host to connect, which runs the
+#    'handle_connection.sh' script and creates a /tmp/host_ip.env file.
+# 4. Once this "handshake" file is detected, it loads the dynamic IP.
+# 5. It then executes the main Python application *through* the
+#    dynamically-created proxy config.
 #
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-# --- 1. Start SSH Server ---
+# --- 1. Pre-flight Checks & SSH Server Start ---
 echo "✅ Preparing to start SSH server..."
 
 if [ ! -f /app/sshd_config ]; then
@@ -32,30 +34,41 @@ ls -la /app/host_keys
 echo "🔥 Starting SSH server in background..."
 /usr/sbin/sshd -D -e -f /app/sshd_config &
 
-echo "✅ SSH server started. Awaiting connection from SDR host..."
+# --- 2. Wait for Dynamic Handshake ---
+echo "⏳ Waiting for SDR host to connect and provide IP..."
 
-# --- 2. Wait for SOCKS Proxy Tunnel ---
+# Define the path for the file our 'handle_connection.sh' script will create
+HANDSHAKE_FILE="/tmp/host_ip.env"
 
-echo "⏳ Waiting for the remote SOCKS proxy tunnel to be established on port 8080..."
-echo "   (This requires the remote SDR host to connect with 'ssh -D 8080')"
-
-#
-# ▼▼▼ THIS IS THE FIX ▼▼▼
-#
-# We check the SDR host's IP (192.168.1.115), NOT 'host.docker.internal'.
-while ! nc -z -w 2 192.168.1.115 8080; do
-  echo "   ... proxy not yet detected at 192.168.1.115:8080. Retrying in 2s..."
-  sleep 2 # wait 2 seconds before checking again
+while [ ! -f "$HANDSHAKE_FILE" ]; do
+  # Robustness Check: Ensure sshd is still running.
+  # If it crashes for any reason (e.g., bad config), we must exit.
+  if ! pgrep -x "sshd" > /dev/null; then
+    echo "❌ FATAL: sshd process died before a host connected. Check sshd logs."
+    exit 1
+  fi
+  sleep 1
 done
-#
-# ▲▲▲ END OF FIX ▲▲▲
-#
 
-echo "✅ SOCKS proxy tunnel is active! Handing off to main Python application..."
+echo "   Handshake file '$HANDSHAKE_FILE' detected."
 
-# --- 3. Start Main Application (via Proxy) ---
-#
-# Now that the tunnel is confirmed, we execute the app through proxychains.
-#
-echo "🚀 Starting Core Cast main.py via proxychains..."
-exec proxychains4 -f /app/proxychains.conf python3 /app/main.py
+# --- 3. Load Dynamic Configuration ---
+# Load the dynamic IP and SDR_REMOTE variables from the file
+source "$HANDSHAKE_FILE"
+
+# Extract the IP for logging
+HOST_IP=$(echo "$SDR_REMOTE" | cut -d':' -f1)
+
+if [ -z "$HOST_IP" ]; then
+    echo "❌ FATAL: Handshake file was incomplete. Could not read IP."
+    exit 1
+fi
+
+echo "✅ SDR Host connected from $HOST_IP."
+
+# --- 4. Start Main Application (via Proxy) ---
+echo "🚀 Starting Core Cast main.py via dynamic proxy..."
+
+# The 'SDR_REMOTE' env var is now correctly set for the Python app.
+# We point proxychains to the dynamic config file created by the handshake.
+exec proxychains4 -f /tmp/proxy.conf python3 /app/main.py

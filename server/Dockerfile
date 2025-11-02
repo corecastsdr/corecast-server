@@ -37,7 +37,10 @@ WORKDIR /app
 COPY main.py .
 COPY entrypoint.sh .
 COPY sshd_config .
-RUN chmod +x entrypoint.sh
+
+COPY handle_connection.sh .
+
+RUN chmod +x entrypoint.sh handle_connection.sh
 
 # === STEP 4: Define the Container's Entrypoint and Ports ===
 EXPOSE 22
