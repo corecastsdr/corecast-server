@@ -48,3 +48,16 @@ services:
 
       REMOTE_MTU: "1280"
 
+      INTERNAL_API_KEY: "change-me-to-a-very-long-secret-key"
+
+      # This is the internal Docker DNS name for your API container
+      METRICS_API_URL: "http://corecast-api:7000/api/metrics"
+
+  networks:
+      - corecast_net
+
+
+
+networks:
+  corecast_net:
+    external: true

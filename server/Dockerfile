@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-websockets \
     netcat-traditional \
     proxychains4 \
+    python3-httpx \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # === STEP 2: Create User and Generate Host Keys in a SAFE location ===
