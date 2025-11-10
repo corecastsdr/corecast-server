@@ -11,6 +11,9 @@ services:
 
     restart: unless-stopped
 
+    networks:
+      corecast_net: {}
+
 
     ports:
       - "2222:2222"
@@ -33,6 +36,9 @@ services:
       - ./sshd_config:/app/sshd_config:ro
 
     environment:
+
+      ROLE: "all"
+
       SDR_REMOTE: "127.0.0.1:55132"
       # REMOTE_PROT: "tcp"
       REMOTE_TIMEOUT_MS: "100000"
@@ -53,8 +59,9 @@ services:
       # This is the internal Docker DNS name for your API container
       METRICS_API_URL: "http://corecast-api:7000/api/metrics"
 
-  networks:
-      - corecast_net
+      ZMQ_PORT: "5678"
+
+
 
 
 

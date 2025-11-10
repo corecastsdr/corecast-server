@@ -1,31 +1,35 @@
+#!/usr/bin/env python3
 #
-# Core Cast Server - Main Application
+# Core Cast Server - Main Application (Upgraded for Controller/Worker/Autoscaler)
 #
-# This Python script uses GNURadio and WebSockets to create the Core Cast
-# multi-user SDR server. It performs the following functions:
+# This script reads a `ROLE` environment variable to determine its function:
 #
-# 1. Connects to a remote SoapySDR device (via `soapy_server`).
-# 2. Performs robust sample rate negotiation to find a stable rate.
-# 3. Creates a main `CoreSDR` (gr.top_block) to:
-#    - Receive the wideband I/Q stream.
-#    - Generate FFT data for the waterfall.
-#    - Publish the I/Q stream via ZeroMQ (ZMQ) for fanning out.
-# 4. Spawns a `ClientRx` (gr.top_block) for *each* connected user, which:
-#    - Subscribes to the ZMQ I/Q stream.
-#    - Performs DSP (mixing, filtering, demodulation) per user's request.
-# 5. Runs two WebSocket servers:
-#    - Port 3050: Audio server (sends audio, receives 'tune' commands).
-#    - Port 3051: Waterfall server (sends FFT data, receives 'span' commands).
+# 1. ROLE="controller":
+#    - Runs CoreSDR (connects to SDR).
+#    - Runs the Waterfall server (port 3051).
+#    - Publishes the I/Q stream to a *fixed* ZMQ port (e.g., tcp://0.0.0.0:5678).
 #
-# 6. (NEW) Securely logs verified listener session duration to a private
-#    metrics API if INTERNAL_API_KEY is provided.
+# 2. ROLE="worker":
+#    - Connects to the Controller's ZMQ stream (via `ZMQ_HOST_ADDR`).
+#    - Runs the Audio server (port 3050) & spawns ClientRx blocks.
+#    - Enforces `MAX_CLIENTS` limit.
+#    - **NEW**: Runs a metrics server on port 8001 (e.g., /metrics)
 #
-# Configuration is handled via environment variables.
+# 3. ROLE="all" (default):
+#    - Original behavior. Runs everything in one container.
+#    - **NEW**: Also runs the metrics server on port 8001.
 #
 
 import importlib, sys, time, os, random, asyncio, json, signal, itertools
 import numpy as np, websockets
-import httpx # <-- 1. NEW IMPORT (run 'pip install httpx')
+import httpx
+
+# --- NEW IMPORTS ---
+# Add these for the lightweight metrics server
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+# --- END NEW IMPORTS ---
+
 
 # ---- GR compat shim ----
 try:
@@ -65,9 +69,27 @@ REMOTE_PROT  = os.getenv("REMOTE_PROT", "tcp")
 REMOTE_TO_MS = env_int("REMOTE_TIMEOUT_MS", 8000)
 REMOTE_MTU   = os.getenv("REMOTE_MTU")
 
-# --- 2. NEW: Metrics API Configuration ---
+# --- Role and Scaling Configuration ---
+ROLE = os.getenv("ROLE", "all").lower()
+MAX_CLIENTS = env_int("MAX_CLIENTS", 0) # 0 = unlimited. For 'worker' or 'all' roles.
+
+# --- ZMQ Configuration ---
+ZMQ_PORT = env_int("ZMQ_PORT", 5678)
+ZMQ_BIND_ADDR = f"tcp://0.0.0.0:{ZMQ_PORT}" # For the PUB sink (Controller/All)
+ZMQ_HOST_ADDR = os.getenv("ZMQ_HOST_ADDR") # For the SUB source (Worker)
+
+# This is the address ClientRx (the subscriber) will use
+if ROLE == "worker":
+    if not ZMQ_HOST_ADDR:
+        log("❌ FATAL: ROLE=worker but ZMQ_HOST_ADDR is not set!")
+        sys.exit(1)
+    ZMQ_CONNECT_ADDR = ZMQ_HOST_ADDR
+else:
+    ZMQ_CONNECT_ADDR = f"tcp://127.0.0.1:{ZMQ_PORT}" # "all" mode connects to itself
+
+# --- Metrics API Configuration ---
 API_KEY = os.getenv("INTERNAL_API_KEY")
-API_URL = os.getenv("METRICS_API_URL") # e.g., "http://corecast-api:7000/api/metrics"
+API_URL = os.getenv("METRICS_API_URL")
 http_client = None
 
 if API_KEY and API_URL:
@@ -77,11 +99,9 @@ if API_KEY and API_URL:
         timeout=5.0
     )
 else:
-    log("⚠️  Metrics API key/URL not set. Skipping stats logging. (This is safe for open-source builds)")
+    log("⚠️  Metrics API key/URL not set. Skipping stats logging.")
 
-# ==============================================================================
-# === THE CORRECT, ROBUST WAY TO BUILD THE DEVICE STRING ===
-# ==============================================================================
+# --- Soapy Device String ---
 dev_parts = [
     f"driver=remote",
     f"remote=tcp://{REMOTE_URL}",
@@ -90,19 +110,17 @@ dev_parts = [
 ]
 if REMOTE_MTU:
     dev_parts.append(f"remote:mtu={REMOTE_MTU}")
-
 DEV_STR = ",".join(dev_parts)
 log(f"DEBUG: Attempting to connect with device string: {DEV_STR}")
-# ==============================================================================
 
 # --- DSP/App Globals ---
-ZMQ_ADDR = f"tcp://127.0.0.1:{random.randint(5600, 5900)}"
 LOW_HZ   = CENTER - SPAN_RATE/2
 HIGH_HZ  = CENTER + SPAN_RATE/2
 BIN_HZ   = SPAN_RATE / FFT_SIZE
 CHUNK_S  = AUD_RATE * CHUNK_MS // 1000
+active_sessions = set() # For tracking client limits
 
-# ... (All functions from hz_to_bin to pick_working_rate are UNCHANGED) ...
+# ───────── Rate Negotiation (UNCHANGED) ─────────
 def hz_to_bin(hz: float) -> int:
     return int(max(0, min(FFT_SIZE-1, round((hz-LOW_HZ)/BIN_HZ))))
 def _open_device_for_probe():
@@ -143,8 +161,13 @@ def pick_working_rate(target:int) -> int:
     for c in cands:
         if _try_block_setrate(c): return c
     raise RuntimeError("No acceptable sample rate found")
-# ... (CoreSDR class is UNCHANGED) ...
+
+# ───────── CoreSDR Class (UNCHANGED) ─────────
 class CoreSDR(gr.top_block):
+    """
+    GNU Radio block to connect to the SDR, run sample rate negotiation,
+    and publish the I/Q stream to ZMQ. Only run by "controller" or "all" roles.
+    """
     def __init__(self):
         super().__init__("core")
         chosen = pick_working_rate(SPAN_RATE)
@@ -155,7 +178,10 @@ class CoreSDR(gr.top_block):
             except Exception as e: log(f"[gr] set_sample_rate({attempt}) failed: {e}")
         else: raise RuntimeError("GNURadio soapy.source refused every tested rate")
         src.set_frequency(0, CENTER); src.set_gain(0, "TUNER", GAIN_DB)
-        pub = zeromq.pub_sink(gr.sizeof_gr_complex, 1, ZMQ_ADDR, 100, False, -1)
+
+        log(f"ZMQ PUB Sink binding to {ZMQ_BIND_ADDR}")
+        pub = zeromq.pub_sink(gr.sizeof_gr_complex, 1, ZMQ_BIND_ADDR, 100, False, -1)
+
         vec = blocks.stream_to_vector(gr.sizeof_gr_complex, FFT_SIZE)
         fftb = fft.fft_vcc(FFT_SIZE, True, window.blackmanharris(FFT_SIZE), True, 3)
         mag2 = blocks.complex_to_mag_squared(FFT_SIZE)
@@ -168,8 +194,14 @@ class CoreSDR(gr.top_block):
         data = self._sink.data()
         if not data: return None
         frame = list(data[:FFT_SIZE]); self._sink.reset(); return frame
-# ... (ClientRx class is UNCHANGED) ...
+
+# ───────── ClientRx Class (UNCHANGED) ─────────
 class ClientRx(gr.top_block):
+    """
+    GNU Radio block to handle a single client's DSP.
+    Subscribes to the ZMQ stream and performs demodulation.
+    Run by "worker" or "all" roles.
+    """
     _ids = itertools.count(1)
     def __init__(self, off_hz, mode, bw, sql):
         super().__init__(f"Rx#{next(self._ids)}")
@@ -177,7 +209,10 @@ class ClientRx(gr.top_block):
         self._build(); self.start()
     def _build(self):
         self.lock(); self.disconnect_all()
-        zmq = zeromq.sub_source(gr.sizeof_gr_complex, 1, ZMQ_ADDR, 100, False, True)
+
+        log(f"ZMQ SUB Source connecting to {ZMQ_CONNECT_ADDR}")
+        zmq = zeromq.sub_source(gr.sizeof_gr_complex, 1, ZMQ_CONNECT_ADDR, 100, False, True)
+
         bw = max(10e3, min(180e3, self.bw or 200e3))
         taps = firdes.low_pass(1, SPAN_RATE, bw/2, bw/4)
         dec = SPAN_RATE // 8
@@ -206,80 +241,54 @@ class ClientRx(gr.top_block):
     def close(self):
         self.stop(); self.wait()
 
+# ───────── AudioSession Class (UNCHANGED) ─────────
 class AudioSession:
     """
     Manages the WebSocket lifecycle for a single *audio* client.
-    Contains the async loops for pumping audio and receiving tune commands.
+    Contains the async loops for pumping audio, receiving tune commands,
+    and logging metrics. Manages adding/removing from `active_sessions`.
     """
-    # --- 3. MODIFY __init__ ---
     def __init__(self, ws, first, user_uuid, station_uuid):
-        """Links the WebSocket to a new ClientRx flowgraph."""
         log(f"New audio session for user {user_uuid} on station {station_uuid}")
         self.ws = ws
-        # Store identifiers for logging
         self.user_uuid = user_uuid
         self.station_uuid = station_uuid
         self.start_time = time.time()
-        self.session_db_id = None # Will be set by log_session_start
+        self.session_db_id = None
         self.client_ip = ws.remote_address[0] if ws.remote_address else "unknown"
-
-        # Create a dedicated DSP block for this client
         self.rx = ClientRx(first["freq"]-CENTER, first.get("mode","wbfm"), first.get("bw"), first.get("sql"))
 
-    # --- 4. ADD HELPER METHODS for logging ---
     def log_session_start(self):
         """Calls the secure metrics API to log the start of a session."""
-        # http_client is the global client
         if not http_client or not self.user_uuid or not self.station_uuid:
-            if not http_client:
-                log("Metrics API client not configured. Skipping stats.")
-            else:
-                log(f"Session start aborted: missing user_uuid ({self.user_uuid}) or station_uuid ({self.station_uuid})")
+            if not http_client: log("Metrics API client not configured. Skipping stats.")
+            else: log(f"Session start aborted: missing user_uuid ({self.user_uuid}) or station_uuid ({self.station_uuid})")
             return
-
         payload = {
-            "user_uuid": self.user_uuid,
-            "station_uuid": self.station_uuid,
-            "client_ip": self.client_ip,
-            "container_id": os.getenv("HOSTNAME", "unknown_sdr_server"),
-            "freq_hz": self.rx.off + CENTER,
-            "mode": self.rx.mode,
-            "bw": self.rx.bw,
-            "sql_level": self.rx.sql,
+            "user_uuid": self.user_uuid, "station_uuid": self.station_uuid,
+            "client_ip": self.client_ip, "container_id": os.getenv("HOSTNAME", "unknown_sdr_server"),
+            "freq_hz": self.rx.off + CENTER, "mode": self.rx.mode, "bw": self.rx.bw, "sql_level": self.rx.sql,
         }
         try:
             res = http_client.post(f"{API_URL}/session/start", json=payload)
             if res.status_code == 200:
                 self.session_db_id = res.json().get("session_id")
                 log(f"Logged session start for user {self.user_uuid}, db_id: {self.session_db_id}")
-            else:
-                log(f"API Error (start): {res.status_code} - {res.text}")
-        except Exception as e:
-            log(f"API Exception (start): {e}")
+            else: log(f"API Error (start): {res.status_code} - {res.text}")
+        except Exception as e: log(f"API Exception (start): {e}")
 
     def log_session_end(self):
         """Calls the secure metrics API to log the end of a session."""
         if not http_client or not self.session_db_id:
-            if not http_client:
-                log("Metrics API client not configured. Skipping stats.")
-            else:
-                log(f"Session end aborted for user {self.user_uuid}: no session_db_id (start log likely failed)")
+            if not http_client: log("Metrics API client not configured. Skipping stats.")
+            else: log(f"Session end aborted for user {self.user_uuid}: no session_db_id (start log likely failed)")
             return
-
-        # Calculate duration on the server. This is the *secure* part.
         duration = time.time() - self.start_time
-
-        payload = {
-            "session_db_id": self.session_db_id,
-            # The Python API will use this field.
-            "duration_sec": duration
-        }
+        payload = { "session_db_id": self.session_db_id, "duration_sec": duration }
         try:
-            # Send the request
             res = http_client.post(f"{API_URL}/session/end", json=payload)
             log(f"Logged session end for user {self.user_uuid}, db_id: {self.session_db_id}, duration: {duration:.2f}s. Status: {res.status_code}")
-        except Exception as e:
-            log(f"API Exception (end): {e}")
+        except Exception as e: log(f"API Exception (end): {e}")
 
     async def pump_audio(self):
         """Async loop: Continuously pulls audio from ClientRx and sends it over the WebSocket."""
@@ -288,7 +297,7 @@ class AudioSession:
             if data:
                 await self.ws.send(data)
             else:
-                await asyncio.sleep(CHUNK_MS/2000) # Sleep for 1/2 chunk time
+                await asyncio.sleep(CHUNK_MS/2000)
 
     async def ctl(self):
         """Async loop: Listens for JSON 'tune' commands from the client and retunes the ClientRx."""
@@ -298,28 +307,26 @@ class AudioSession:
             except: continue
             if cmd.get("type")!="tune": continue
             f=cmd.get("freq")
-            if f is not None and abs(f-CENTER)>SPAN_RATE/2: continue # Out of bounds
-
-            # We only care about the UUIDs on the *first* packet,
-            # which is handled by audio_handler.
-            # Here we just apply the DSP settings.
+            if f is not None and abs(f-CENTER)>SPAN_RATE/2: continue
             self.rx.retune(off_hz=f-CENTER if f is not None else None,mode=cmd.get("mode"),bw=cmd.get("bw"),sql=cmd.get("sql"))
             jlog("tune", **cmd)
 
     async def run(self):
-        """Runs the audio pump and control loops concurrently."""
+        """Runs the audio pump and control loops, managing session count."""
         try:
-            # --- 5. CALL THE LOG START METHOD ---
+            active_sessions.add(self) # Add self to global set
+            log(f"Audio session started. Active sessions: {len(active_sessions)}")
             self.log_session_start()
             await asyncio.gather(self.pump_audio(), self.ctl())
         finally:
-            # --- 6. CALL THE LOG END METHOD ---
-            # This executes when the WebSocket closes for any reason.
+            active_sessions.remove(self) # Remove self from global set
+            log(f"Audio session ended. Active sessions: {len(active_sessions)}")
             self.log_session_end()
-            self.rx.close() # Ensure flowgraph is stopped on exit
+            self.rx.close()
 
-# ... (WfSession class is UNCHANGED) ...
+# ───────── WfSession Class (UNCHANGED) ─────────
 class WfSession:
+    """Manages the WebSocket lifecycle for a single *waterfall* client."""
     def __init__(self, ws):
         self.ws = ws
         self.minH, self.maxH = LOW_HZ, HIGH_HZ
@@ -343,13 +350,19 @@ class WfSession:
         await asyncio.gather(self.pump(core),self.ctl())
 
 
-async def audio_handler(ws, _p, core):
+# ───────── WebSocket Handlers (UNCHANGED) ─────────
+async def audio_handler(ws, _p, core): # 'core' is unused by this handler
     """
     Main entrypoint for new audio WebSocket connections (port 3050).
-    Validates the first packet and starts an AudioSession.
+    Validates the first packet, checks client limits, and starts an AudioSession.
     """
+    first_packet_str = ""
     try:
-        # Wait for the first "tune" packet
+        # Check client limit
+        if MAX_CLIENTS > 0 and len(active_sessions) >= MAX_CLIENTS:
+            log(f"Connection from {ws.remote_address[0]} rejected: server full ({len(active_sessions)}/{MAX_CLIENTS})")
+            await ws.close(4005, "server full"); return
+
         first_packet_str = await ws.recv()
         first = json.loads(first_packet_str)
 
@@ -358,70 +371,127 @@ async def audio_handler(ws, _p, core):
         if abs(first["freq"] - CENTER) > SPAN_RATE/2:
             await ws.close(4001, "out of span"); return
 
-        # --- 7. EXTRACT UUIDs and PASS them ---
         user_uuid = first.get("user_uuid")
         station_uuid = first.get("station_uuid")
 
         if not user_uuid:
-            # We require an authenticated user to log stats.
-            log(f"Connection from {ws.remote_address[0]} rejected: user_uuid not provided in first tune packet.")
+            log(f"Connection from {ws.remote_address[0]} rejected: user_uuid not provided.")
             await ws.close(4002, "user_uuid required"); return
-
         if not station_uuid:
-            log(f"Connection from {user_uuid} rejected: station_uuid not provided in first tune packet.")
+            log(f"Connection from {user_uuid} rejected: station_uuid not provided.")
             await ws.close(4003, "station_uuid required"); return
 
-        # Hand off to a new session, passing the validated data
         await AudioSession(ws, first, user_uuid, station_uuid).run()
 
     except websockets.ConnectionClosed:
-        pass # Handle disconnects gracefully
+        pass
     except Exception as e:
-        log(f"Audio handler error: {e}. Packet: '{first_packet_str if 'first_packet_str' in locals() else 'N/A'}'")
+        log(f"Audio handler error: {e}. Packet: '{first_packet_str}'")
 
 
 async def wf_handler(ws, _p, core):
     """
     Main entrypoint for new waterfall WebSocket connections (port 3051).
-    Starts a WfSession.
+    Starts a WfSession. 'core' is required to grab FFT data.
     """
     try: await WfSession(ws,).run(core)
     except websockets.ConnectionClosed: pass # Handle disconnects gracefully
 
-# ==============================================================================
-# === THE CORRECT, FINAL VERSION OF dump_env() ===
-# ==============================================================================
+
+# ───────── NEW: Metrics Server ─────────
+class MetricsHandler(BaseHTTPRequestHandler):
+    """A simple HTTP server to report the number of active clients."""
+    def do_GET(self):
+        """Handles GET requests. Only /metrics is valid."""
+        if self.path == '/metrics':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            # Read the length of the global set in a thread-safe way
+            count = len(active_sessions)
+            self.wfile.write(json.dumps({"client_count": count}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
+
+    def log_message(self, format, *args):
+        """Suppresses the default HTTP log spam to keep stdout clean."""
+        return
+
+def start_metrics_server(port=8001):
+    """
+    Runs the blocking HTTPServer in a separate daemon thread.
+    This prevents it from blocking the main asyncio event loop.
+    """
+    try:
+        server = HTTPServer(('', port), MetricsHandler)
+        log(f"✅ Metrics server started on http://0.0.0.0:{port}")
+        server.serve_forever()
+    except Exception as e:
+        log(f"❌ FATAL: Metrics server failed to start: {e}")
+# -----------------------------------
+
+
+# ───────── dump_env (UNCHANGED) ─────────
 def dump_env():
     """Logs the key environment variables being used."""
     keys = [
         "SDR_REMOTE", "REMOTE_PROT", "REMOTE_TIMEOUT_MS", "SPAN_RATE", "CENTER",
         "FFT_SIZE", "AUD_RATE", "GAIN_DB", "CHUNK_MS", "REMOTE_MTU",
-        "METRICS_API_URL", # <-- Log the API URL
-        # DO NOT log INTERNAL_API_KEY
+        "METRICS_API_URL", "ROLE", "MAX_CLIENTS", "ZMQ_PORT", "ZMQ_HOST_ADDR"
     ]
     env_vars = {k: os.getenv(k) for k in keys}
-    # Add a key to show if metrics are enabled or not, without logging the key
     env_vars["METRICS_ENABLED"] = "True" if (API_KEY and API_URL) else "False"
     jlog("env", **env_vars)
 
+# ───────── main() (MODIFIED) ─────────
 async def main():
     """Main application entrypoint."""
     dump_env() # Log configuration
+    log(f"--- Starting Core Cast Server in ROLE='{ROLE}' ---")
 
-    if os.getenv("DIAG", "0").lower() in ("1", "true", "yes"):
-        try: _ = pick_working_rate(SPAN_RATE); log("[diag] SUCCESS: a rate works"); sys.exit(0)
-        except Exception as e: log("[diag] FAILURE:", e); sys.exit(2)
+    core = None
+    tasks = [] # List of asyncio tasks to run forever
 
-    core = CoreSDR()
-    log(f"Remote RTL @ {REMOTE_URL}  tuned {CENTER/1e6:.3f} MHz  ZMQ {ZMQ_ADDR}")
+    # --- Controller or All: Start CoreSDR and Waterfall ---
+    if ROLE in ("controller", "all"):
+        if os.getenv("DIAG", "0").lower() in ("1", "true", "yes"):
+            try: _ = pick_working_rate(SPAN_RATE); log("[diag] SUCCESS: a rate works"); sys.exit(0)
+            except Exception as e: log("[diag] FAILURE:", e); sys.exit(2)
 
-    audio_srv = websockets.serve(lambda w, p: audio_handler(w, p, core), "", 3050, max_size=None)
-    wf_srv = websockets.serve(lambda w, p: wf_handler(w, p, core), "", 3051, max_size=None)
+        log("Starting CoreSDR...")
+        core = CoreSDR()
+        log(f"Remote RTL @ {REMOTE_URL}  tuned {CENTER/1e6:.3f} MHz  ZMQ_BIND={ZMQ_BIND_ADDR}")
 
-    async with audio_srv, wf_srv:
-        log("🔊  ws://<host>:3050  (tune JSON ↔ 48 kHz audio)")
+        log("Starting Waterfall Server (port 3051)...")
+        wf_srv = await websockets.serve(lambda w, p: wf_handler(w, p, core), "", 3051, max_size=None)
+        tasks.append(wf_srv.serve_forever())
         log("🌈  ws://<host>:3051  (waterfall)")
-        await asyncio.Future() # Run forever
+
+    # --- Worker or All: Start Audio AND Metrics ---
+    if ROLE in ("worker", "all"):
+        log("Starting Audio Server (port 3050)...")
+        # Pass 'core' (which is None for 'worker' role) - audio_handler doesn't use it.
+        audio_srv = await websockets.serve(lambda w, p: audio_handler(w, p, core), "", 3050, max_size=None)
+        tasks.append(audio_srv.serve_forever())
+        log("🔊  ws://<host>:3050  (audio)")
+
+        # --- NEW: Start Metrics Server ---
+        # Run the blocking HTTPServer in a separate daemon thread
+        # daemon=True ensures this thread exits when the main program exits
+        log("Starting metrics server (port 8001)...")
+        metrics_thread = threading.Thread(target=start_metrics_server, args=(8001,), daemon=True)
+        metrics_thread.start()
+        # --- END NEW ---
+
+    if not tasks:
+        log(f"❌ FATAL: Unknown ROLE='{ROLE}'. No services started.")
+        sys.exit(1)
+
+    # Run all started asyncio tasks forever
+    await asyncio.gather(*tasks)
+
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda *_: exit(0))

@@ -1,0 +1,72 @@
+# docker-compose.scaled.yml
+#
+# This file demonstrates the "Controller/Worker" pattern.
+#
+# To use:
+# 1. Run the controller: `docker-compose -f docker-compose.scaled.yml up -d controller`
+# 2. Scale up workers:   `docker-compose -f docker-compose.scaled.yml up -d --scale worker=3`
+#
+# This would create 1 controller and 3 workers.
+#
+version: "3.8"
+
+services:
+  # === 1. The Controller ===
+  # Runs 24/7. Handles SSH handshake, SDR, and Waterfall.
+  controller:
+    image: evanparden/corecast:corecast-server
+    container_name: corecast-controller
+    restart: unless-stopped
+    ports:
+      - "2222:2222"  # For the host's SSH reverse tunnel
+      - "3051:3051"  # For the public Waterfall WS
+      - "5678:5678"  # For the internal ZMQ stream
+    volumes:
+      - ./sshd_config:/app/sshd_config:ro
+    environment:
+      ROLE: "controller"
+      ZMQ_PORT: "5678"
+      # --- Add your other ENV vars (CENTER, SPAN_RATE, etc) ---
+      CENTER: "104100000"
+      SPAN_RATE: "2048000"
+      GAIN_DB: "20"
+      # ...
+      METRICS_API_URL: "http://corecast-api:7000/api/metrics"
+      INTERNAL_API_KEY: "change-me-to-a-very-long-secret-key"
+    networks:
+      - corecast_net
+
+  # === 2. The Worker ===
+  # Scalable. Handles Audio DSP. Costs $0 at idle if scaled to 0.
+  worker:
+    image: evanparden/corecast:corecast-server
+    # We don't name the container so it can be scaled
+    restart: unless-stopped
+    # No SSH port. We expose the audio port.
+    # A real production setup would use a load balancer (like Traefik)
+    # instead of publishing ports like this.
+    ports:
+      - "3050" # Binds to a random host port, e.g., 32768 -> 3050
+    environment:
+      ROLE: "worker"
+      # Tells the worker how to find the controller on the Docker network
+      ZMQ_HOST_ADDR: "tcp://controller:5678"
+      ZMQ_PORT: "5678"
+      # Set a limit for this worker
+      MAX_CLIENTS: "10"
+      # --- Add other ENV vars (CENTER, SPAN_RATE, etc) ---
+      CENTER: "104100000"
+      SPAN_RATE: "2048000"
+      # ...
+      METRICS_API_URL: "http://corecast-api:7000/api/metrics"
+      INTERNAL_API_KEY: "change-me-to-a-very-long-secret-key"
+    networks:
+      - corecast_net
+    depends_on:
+      - controller
+
+networks:
+  corecast_net:
+    # Use an external network if you have one, or let Docker create one.
+    # name: "corecast_net"
+    driver: bridge
