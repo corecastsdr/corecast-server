@@ -46,7 +46,12 @@ services:
     # A real production setup would use a load balancer (like Traefik)
     # instead of publishing ports like this.
     ports:
-      - "3050" # Binds to a random host port, e.g., 32768 -> 3050
+      - "2222:2222"  # SSH
+      - "3051:3051"  # Waterfall
+      - "5678:5678"  # ZMQ
+      - "8002:8002"
+
+
     environment:
       ROLE: "worker"
       # Tells the worker how to find the controller on the Docker network

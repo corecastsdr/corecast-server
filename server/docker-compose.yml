@@ -17,8 +17,11 @@ services:
 
     ports:
       - "2222:2222"
-      - "3050:3050"
-      - "3051:3051"
+      # waterfall
+      - "50351:50351"
+      # audio
+      - "50350:50350"
+      - "8002:8002"
 
     # This is the change. We are now using a "bind mount".
     # This links the ./ssh_keys folder from your computer into the container.
@@ -53,6 +56,8 @@ services:
       LD_LIBRARY_PATH: /usr/lib
 
       REMOTE_MTU: "1280"
+
+      MAX_CLIENTS: "10"
 
       INTERNAL_API_KEY: "change-me-to-a-very-long-secret-key"
 

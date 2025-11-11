@@ -132,6 +132,8 @@ sudo docker-compose up --build
 sudo docker-compose up --force-recreate --build -d
 
 
+sudo docker network create corecast_net
+
 
 sudo docker logs -f --tail=100 corecast-server
 
