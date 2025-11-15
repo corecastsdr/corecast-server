@@ -1,0 +1,9 @@
+# Local environment variables
+.env
+
+# SSH host keys
+ssh_keys/
+
+# IDE files
+.vscode/
+.idea/

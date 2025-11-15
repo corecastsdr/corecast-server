@@ -234,12 +234,4 @@ This server is the *backend* piece of the Core Cast platform. By itself, it just
 
 When a user clicks on your station on the website, the web application (front-end) will be instructed to open WebSockets directly to your server's IP on ports `50350` (audio) and `50351` (waterfall), passing along the `station_uuid` and their `user_uuid` to log the session.
 
-## ⚖️ License
-
-Copyright (c) 2025-Present Core Cast.
-
-This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
-
-This means it is free to use, modify, and distribute for **non-commercial purposes only**. You may not use this software for any commercial purposes.
-
-See the `LICENSE.md` file for the full text.
+sudo docker network create corecast_net

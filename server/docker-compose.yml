@@ -11,6 +11,8 @@ services:
 
     restart: unless-stopped
 
+    env_file: ./.env
+
     networks:
       corecast_net: {}
 

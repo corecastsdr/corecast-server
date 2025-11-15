@@ -3,17 +3,15 @@
 # Core Cast Server - Entrypoint (Upgraded for Controller/Worker Roles)
 #
 # Reads the `ROLE` env var:
-# 1. "controller" or "all": Performs the full SSH handshake, waits for the
-#    host, and then runs main.py (via proxychains).
-# 2. "worker": Skips the SSH handshake entirely and runs main.py directly,
-#    expecting a `ZMQ_HOST_ADDR` to be set.
+# 1. "controller" or "all": Creates the SSH user, sets their password,
+#    starts sshd, waits for the host, and then runs main.py.
+# 2. "worker": Skips all SSH logic and runs main.py directly.
 #
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
 # --- 0. Determine Role ---
-# Default to "all" for backward-compatibility with your old docker-compose.yml
 ROLE=${ROLE:-all}
 ROLE=$(echo "$ROLE" | tr '[:upper:]' '[:lower:]')
 echo "--- Core Cast Entrypoint: Detected ROLE=$ROLE ---"
@@ -22,6 +20,30 @@ echo "--- Core Cast Entrypoint: Detected ROLE=$ROLE ---"
 # --- 1. Handshake Logic (for Controller or All) ---
 if [[ "$ROLE" == "controller" ]] || [[ "$ROLE" == "all" ]]; then
   echo "✅ Role requires SSH handshake. Preparing to start SSH server..."
+
+  # --- NEW: Create the SSH User ---
+  # Read from env (set by .env file or cloud provider)
+  # Default to 'sdr_host' if not set
+  CORECAST_SSH_USER=${CORECAST_SSH_USER:-sdr_host}
+
+  if [ -z "$CORECAST_HOST_PASSWORD" ]; then
+      echo "❌ FATAL: CORECAST_HOST_PASSWORD environment variable is not set!"
+      echo "   Please create a .env file or set it at runtime."
+      exit 1
+  fi
+
+  echo "   Creating SSH user '$CORECAST_SSH_USER'..."
+
+  # Create a user with a home directory, but no shell access (locked by ForceCommand)
+  # This avoids potential conflicts if the user already exists in the base image
+  if ! id -u "$CORECAST_SSH_USER" >/dev/null 2>&1; then
+      useradd -m -s /bin/bash "$CORECAST_SSH_USER"
+  fi
+
+  # Set the user's password
+  echo "$CORECAST_SSH_USER:$CORECAST_HOST_PASSWORD" | chpasswd
+  echo "   User '$CORECAST_SSH_USER' password set."
+  # --- END NEW ---
 
   if [ ! -f /app/sshd_config ]; then
       echo "❌ FATAL: /app/sshd_config not found!"
@@ -73,7 +95,7 @@ if [[ "$ROLE" == "controller" ]] || [[ "$ROLE" == "all" ]]; then
   exec proxychains4 -f /tmp/proxy.conf python3 /app/main.py
 
 elif [[ "$ROLE" == "worker" ]]; then
-  echo "🚀 Starting Core Cast (ROLE=$ROLE)..."
+  echo "🚀 Starting Core Cast (ROLE=$ROCastsROLE)..."
   if [ -z "$ZMQ_HOST_ADDR" ]; then
     echo "❌ FATAL: ROLE=worker but ZMQ_HOST_ADDR environment variable is not set!"
     exit 1

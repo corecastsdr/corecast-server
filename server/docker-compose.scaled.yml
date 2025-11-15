@@ -17,10 +17,13 @@ services:
     image: evanparden/corecast:corecast-server
     container_name: corecast-controller
     restart: unless-stopped
+    env_file: ./.env
+
     ports:
       - "2222:2222"  # For the host's SSH reverse tunnel
       - "3051:3051"  # For the public Waterfall WS
       - "5678:5678"  # For the internal ZMQ stream
+      - "8002:8002"
     volumes:
       - ./sshd_config:/app/sshd_config:ro
     environment:
