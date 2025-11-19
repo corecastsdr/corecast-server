@@ -1,0 +1,44 @@
+# kubernetes/4_ingress.yaml
+#
+# Creates the public web routes for Audio and Waterfall.
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: station-a-ingress
+  namespace: station-a
+  annotations:
+    # --- IMPORTANT ---
+    # These annotations are for an NGINX Ingress Controller
+    # and are *required* for WebSockets to work.
+    "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600"
+    "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600"
+    "nginx.ingress.kubernetes.io/proxy-buffering": "off"
+    # This assumes you have Cert-Manager installed for free SSL
+    "cert-manager.io/cluster-issuer": "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - "station-a.yourdomain.com"
+    secretName: station-a-tls # Cert-Manager will create this
+  rules:
+  - host: "station-a.yourdomain.com"
+    http:
+      paths:
+      # Route /audio (or /) to the worker's audio port
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: station-a-worker-service
+            port:
+              name: audio # to port 50350
+
+      # You could create a separate path for waterfall:
+      # - path: /waterfall
+      #   pathType: Prefix
+      #   backend:
+      #     service:
+      #       name: station-a-lb
+      #       port:
+      #         name: waterfall # to port 50351

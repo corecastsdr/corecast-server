@@ -64,7 +64,7 @@ services:
       INTERNAL_API_KEY: "change-me-to-a-very-long-secret-key"
 
       # This is the internal Docker DNS name for your API container
-      METRICS_API_URL: "http://corecast-api:7000/api/metrics"
+      METRICS_API_URL: "http://192.168.1.213:7000/api/metrics"
 
       ZMQ_PORT: "5678"
 

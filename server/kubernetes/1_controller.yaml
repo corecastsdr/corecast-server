@@ -1,0 +1,108 @@
+# kubernetes/1_controller.yaml
+#
+# Deploys the single "controller" pod for the station.
+# This pod is high-priority and has stable networking.
+#
+
+# 1. A Namespace to keep all of this station's parts isolated
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: station-a # This name (e.g., from a callsign) is used everywhere
+
+---
+# 2. The public-facing Load Balancer
+# This exposes SSH (2222), Waterfall (50351), and Public Metrics (8002)
+apiVersion: v1
+kind: Service
+metadata:
+  name: station-a-lb
+  namespace: station-a
+spec:
+  type: LoadBalancer # This creates a public DigitalOcean Load Balancer
+  selector:
+    app: station-a-controller # Points to the controller pod
+  ports:
+  - name: ssh
+    port: 2222
+    targetPort: 2222 #
+  - name: waterfall
+    port: 50351
+    targetPort: 50351 #
+  - name: public-metrics
+    port: 8002
+    targetPort: 8002 #
+
+---
+# 3. The *internal* ZMQ service (for workers)
+apiVersion: v1
+kind: Service
+metadata:
+  name: station-a-controller-zmq
+  namespace: station-a
+spec:
+  type: ClusterIP # Only reachable *inside* the cluster
+  selector:
+    app: station-a-controller # Points to the controller pod
+  ports:
+  - name: zmq
+    port: 5678
+    targetPort: 5678 #
+
+---
+# 4. The StatefulSet for the Controller
+# We use a StatefulSet so it has a stable DNS name (station-a-controller-0)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: station-a-controller
+  namespace: station-a
+spec:
+  replicas: 1 # Always exactly one controller
+  serviceName: "station-a-controller"
+  selector:
+    matchLabels:
+      app: station-a-controller
+  template:
+    metadata:
+      labels:
+        app: station-a-controller
+    spec:
+      containers:
+      - name: corecast-server
+        # This is your open-source image
+        image: evanparden/corecast:corecast-server
+        imagePullPolicy: Always
+        env:
+        - name: ROLE
+          value: "controller" #
+        - name: METRICS_API_URL
+          # This must be the *full internal K8s address* of your API
+          value: "http://corecast-api-service.default.svc.cluster.local:7000/api/metrics"
+        # --- Load the SSH password from the Secret ---
+        - name: CORECAST_SSH_USER
+          valueFrom:
+            secretKeyRef:
+              name: station-a-secret
+              key: CORECAST_SSH_USER
+        - name: CORECAST_HOST_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: station-a-secret
+              key: CORECAST_HOST_PASSWORD
+        ports:
+        - containerPort: 2222
+        - containerPort: 50351
+        - containerPort: 8002
+        - containerPort: 5678
+        # --- This sets the "container size" and "bandwidth" priority ---
+        resources:
+          # Request 1 full CPU and 1Gi of RAM
+          requests:
+            cpu: "1000m"
+            memory: "1Gi"
+          # Set the limit to the *same value*
+          # This gives it "Guaranteed" QoS for best performance
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"

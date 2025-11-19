@@ -1,0 +1,70 @@
+# kubernetes/2_worker.yaml
+#
+# Deploys the scalable "worker" pods for the station.
+# These are smaller and will be scaled by the HPA.
+#
+
+# 1. The *internal* service for Audio and Worker Metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: station-a-worker-service
+  namespace: station-a
+spec:
+  type: ClusterIP # Internal only, exposed by the Ingress
+  selector:
+    app: station-a-worker # Points to all worker pods
+  ports:
+  - name: audio
+    port: 50350
+    targetPort: 50350 #
+  - name: local-metrics
+    port: 8001
+    targetPort: 8001 #
+
+---
+# 2. The Deployment for the workers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: station-a-worker
+  namespace: station-a
+spec:
+  replicas: 1 # Start with one, HPA will take over
+  selector:
+    matchLabels:
+      app: station-a-worker
+  template:
+    metadata:
+      labels:
+        app: station-a-worker # For the Service
+        # This label is for Prometheus (the HPA metric scraper)
+        corecast.io/metrics-port: "8001"
+    spec:
+      containers:
+      - name: corecast-server
+        image: evanparden/corecast:corecast-server # Your same image
+        imagePullPolicy: Always
+        env:
+        - name: ROLE
+          value: "worker" #
+        - name: MAX_CLIENTS
+          value: "10" # Max clients *per pod*
+        - name: METRICS_API_URL
+          value: "http://corecast-api-service.default.svc.cluster.local:7000/api/metrics"
+        - name: ZMQ_HOST_ADDR
+          # This is the stable internal DNS name of the controller's ZMQ service
+          value: "tcp://station-a-controller-zmq.station-a.svc.cluster.local:5678"
+        ports:
+        - containerPort: 50350
+        - containerPort: 8001
+        # --- This sets the "container size" for workers ---
+        resources:
+          # Smaller than the controller
+          requests:
+            cpu: "250m" # 0.25 CPU
+            memory: "256Mi"
+          # Can burst up to 1 CPU
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"

@@ -49,6 +49,7 @@ rsync -avzP \
     --exclude="deploy.sh" \
     --exclude="*.pyc" \
     --exclude="__pycache__/" \
+    --exclude="ssh_keys" \
     --exclude="test.py" \
     "$PROJECT_DIR_LOCAL" \
     "$SERVER_USER@$SERVER_IP:$PROJECT_DIR_REMOTE/"

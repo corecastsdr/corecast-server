@@ -1,0 +1,32 @@
+# kubernetes/3_autoscaler.yaml
+#
+# Automatically scales the 'worker' Deployment based on client count.
+#
+# !!! REQUIRES a "metrics pipeline" like Prometheus in your cluster
+#     to read the /metrics endpoint.
+#
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: station-a-worker-hpa
+  namespace: station-a
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: station-a-worker # Targets the Deployment from 2_worker.yaml
+  minReplicas: 1
+  maxReplicas: 20 # Max 20 workers for this station
+  metrics:
+  # This uses the 'client_count' from port 8001
+  - type: Pods
+    pods:
+      metric:
+        # This name (e.g., 'http_requests') must be configured
+        # in your Prometheus-Adapter to read your app's metric.
+        # This is a placeholder:
+        name: corecast_worker_client_count
+      target:
+        type: AverageValue
+        # Target 8 clients per pod. If it goes to 9, add a new pod.
+        averageValue: "8"
