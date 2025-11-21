@@ -21,9 +21,13 @@ services:
 
     ports:
       - "2222:2222"  # For the host's SSH reverse tunnel
-      - "3051:3051"  # For the public Waterfall WS
       - "5678:5678"  # For the internal ZMQ stream
+      # waterfall
+      - "50351:50351"
+      # audio
+      - "50350:50350"
       - "8002:8002"
+      - "8001:8001"
     volumes:
       - ./sshd_config:/app/sshd_config:ro
     environment:

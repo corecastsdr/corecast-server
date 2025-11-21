@@ -24,6 +24,7 @@ services:
       # audio
       - "50350:50350"
       - "8002:8002"
+      - "8001:8001"
 
     # This is the change. We are now using a "bind mount".
     # This links the ./ssh_keys folder from your computer into the container.

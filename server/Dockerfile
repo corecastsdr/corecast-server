@@ -41,4 +41,10 @@ RUN chmod +x entrypoint.sh handle_connection.sh
 
 # === STEP 4: Define the Container's Entrypoint and Ports ===
 EXPOSE 22
+EXPOSE 2222
+EXPOSE 50350
+EXPOSE 50351
+EXPOSE 8001
+EXPOSE 8002
+
 ENTRYPOINT ["/app/entrypoint.sh"]

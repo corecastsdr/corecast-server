@@ -601,7 +601,7 @@ async def main(): #
         log("Starting Waterfall Server (port 3051)...") #
         wf_srv = await websockets.serve(lambda w, p: wf_handler(w, p, core), "", 50351, max_size=None) #
         tasks.append(wf_srv.serve_forever()) #
-        log("🌈  ws://<host>:3051  (waterfall)") #
+        log("🌈  ws://<host>:50351  (waterfall)") #
 
         log("Starting public metrics server (port 8002)...")
         public_metrics_thread = threading.Thread(target=start_public_metrics_server, args=(8002,), daemon=True)
@@ -628,7 +628,7 @@ async def main(): #
         log("Starting Audio Server (port 3050)...") #
         audio_srv = await websockets.serve(lambda w, p: audio_handler(w, p, core), "", 50350, max_size=None) #
         tasks.append(audio_srv.serve_forever()) #
-        log("🔊  ws://<host>:3050  (audio)") #
+        log("🔊  ws://<host>:50350  (audio)") #
 
         log("Starting local metrics server (port 8001)...") #
         metrics_thread = threading.Thread(target=start_metrics_server, args=(8001,), daemon=True) #

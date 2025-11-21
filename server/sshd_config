@@ -21,13 +21,16 @@ AllowAgentForwarding no
 
 
 # --- THIS IS THE MAGIC ---
-# This block applies special rules ONLY to the 'corecast-host' user.
-Match User corecast-host
-    # Re-enable password authentication ONLY for this user.
+#
+# ▼▼▼ THIS IS THE FIX ▼▼▼
+# Use a wildcard to match all dynamic usernames (e.g., "corecast-9c56d573")
+Match User corecast-*
+
+    # Re-enable password authentication ONLY for these users.
     PasswordAuthentication yes
 
     # Force any connection attempt to run our dynamic IP script.
-    # This allows the tunnel AND lets us grab the host's IP.
+    # This is correct and matches your handle_connection.sh file
     ForceCommand /app/handle_connection.sh
 
     # Prevent allocation of an interactive terminal.
