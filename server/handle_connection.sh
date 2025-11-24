@@ -1,40 +1,44 @@
 #!/bin/bash
 #
-# handle_connection.sh
-# This script is run by sshd when the host connects.
-# It extracts the host's IP and writes the dynamic config files
-# that the main entrypoint is waiting for.
+# Core Cast Server - Entrypoint (Simplified Proxy Version)
+#
+set -e
 
-LOG_FILE="/tmp/handle_connection.log"
+# --- 1. Start SSH Server ---
+# We still run sshd so the host can connect and create the proxy tunnel.
+# But we DO NOT wait for it.
+echo "--- Core Cast Entrypoint: Detected ROLE=all ---"
+echo "✅ Starting SSH server in background..."
 
-echo "--- New Connection ---" > "$LOG_FILE"
-
-if [ -z "$SSH_CLIENT" ]; then
-  echo "ERROR: SSH_CLIENT variable is not set." >> "$LOG_KEY"
-  exit 1
+# Create the SSH User
+CORECAST_SSH_USER=${CORECAST_SSH_USER:-corecast-host}
+if [ -z "$CORECAST_HOST_PASSWORD" ]; then
+    echo "❌ FATAL: CORECAST_HOST_PASSWORD environment variable is not set!"
+    exit 1
 fi
-
-echo "SSH_CLIENT=$SSH_CLIENT" >> "$LOG_FILE"
-
-# 1. Extract IP
-HOST_IP=$(echo $SSH_CLIENT | cut -d' ' -f1)
-
-if [ -z "$HOST_IP" ]; then
-  echo "ERROR: Could not extract IP from SSH_CLIENT." >> "$LOG_FILE"
-  exit 1
+echo "   Creating SSH user '$CORECAST_SSH_USER'..."
+if ! id -u "$CORECAST_SSH_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash "$CORECAST_SSH_USER"
 fi
+echo "$CORECAST_SSH_USER:$CORECAST_HOST_PASSWORD" | chpasswd
+echo "   User '$CORECAST_SSH_USER' password set."
+echo "   Found custom config: /app/sshd_config"
+echo "   Found host keys in: /app/host_keys"
+ls -la /app/host_keys
+/usr/sbin/sshd -D -e -f /app/sshd_config &
+echo "🔥 SSH server is running in background."
 
-echo "Extracted IP: $HOST_IP" >> "$LOG_FILE"
-
-# 2. Create the dynamic proxychains config file
+# --- 2. Create Proxy Config ---
+# We create this file immediately. We don't need the host's IP.
+# We will tell proxychains to use the SOCKS proxy on localhost:8080,
+# which the host's -D flag will create.
+echo "   Creating /tmp/proxy.conf for 127.0.0.1:8080"
 echo "[ProxyList]" > /tmp/proxy.conf
-echo "socks5 $HOST_IP 8080" >> /tmp/proxy.conf
-echo "Created /tmp/proxy.conf" >> "$LOG_FILE"
+echo "socks5 127.0.0.1 8080" >> /tmp/proxy.conf
 
-# 3. Create the "signal file" that entrypoint.sh is waiting for
-echo "export SDR_REMOTE=\"$HOST_IP:55132\"" > /tmp/host_ip.env
-echo "Created /tmp/host_ip.env" >> "$LOG_FILE"
-
-# 4. Keep the SSH tunnel alive by sleeping forever
-echo "Handshake complete. Sleeping to keep tunnel open..." >> "$LOG_FILE"
-sleep infinity
+# --- 3. Start Main Application ---
+# We no longer wait. We just start main.py.
+# The host script must be running *before* this, but
+# if it's not, proxychains will just fail and the container will restart.
+echo "🚀 Starting Core Cast (ROLE=all) via dynamic proxy..."
+exec proxychains4 -f /tmp/proxy.conf python3 /app/main.py

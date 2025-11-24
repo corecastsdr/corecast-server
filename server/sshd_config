@@ -1,37 +1,24 @@
-# A minimal and secure sshd_config for the Corecast/CCRX server
+# A minimal and secure sshd_config for the Corecast server
 
 Port 2222
 
-# Global settings: Disable password auth by default for security.
-PasswordAuthentication no
+# Allow password authentication for the host.
+PasswordAuthentication yes
 ChallengeResponseAuthentication no
 PermitRootLogin no
 PermitEmptyPasswords no
+PubkeyAuthentication no
+
+# --- THIS IS THE KEY ---
+# We MUST allow TCP forwarding for the reverse proxy to work.
+AllowTcpForwarding yes
 
 # Standard settings
-PubkeyAuthentication yes
-AllowTcpForwarding yes
 HostKey /app/host_keys/ssh_host_rsa_key
 HostKey /app/host_keys/ssh_host_ed25519_key
 LogLevel VERBOSE
 
-# Disable unnecessary features globally
+# Disable unnecessary features
 X11Forwarding no
 AllowAgentForwarding no
-
-
-# --- THIS IS THE MAGIC ---
-#
-# ▼▼▼ THIS IS THE FIX ▼▼▼
-# Use a wildcard to match all dynamic usernames (e.g., "corecast-9c56d573")
-Match User corecast-*
-
-    # Re-enable password authentication ONLY for these users.
-    PasswordAuthentication yes
-
-    # Force any connection attempt to run our dynamic IP script.
-    # This is correct and matches your handle_connection.sh file
-    ForceCommand /app/handle_connection.sh
-
-    # Prevent allocation of an interactive terminal.
-    PermitTTY no
+PermitTTY no

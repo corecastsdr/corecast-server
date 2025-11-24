@@ -39,6 +39,8 @@ COPY handle_connection.sh .
 
 RUN chmod +x entrypoint.sh handle_connection.sh
 
+RUN chmod 1777 /tmp
+
 # === STEP 4: Define the Container's Entrypoint and Ports ===
 EXPOSE 22
 EXPOSE 2222

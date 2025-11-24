@@ -72,7 +72,7 @@ GAIN_DB    = env_float("GAIN_DB",    20.0) #
 CHUNK_MS   = env_int  ("CHUNK_MS",   20) #
 
 # --- Soapy Remote Config ---
-REMOTE_URL   = os.getenv("SDR_REMOTE", "127.0.0.1:6000") #
+REMOTE_URL = "127.0.0.1:55132"
 REMOTE_PROT  = os.getenv("REMOTE_PROT", "tcp") #
 REMOTE_TO_MS = env_int("REMOTE_TIMEOUT_MS", 8000) #
 REMOTE_MTU   = os.getenv("REMOTE_MTU") #
@@ -85,6 +85,9 @@ MAX_CLIENTS = env_int("MAX_CLIENTS", 0) #
 ZMQ_PORT = env_int("ZMQ_PORT", 5678) #
 ZMQ_BIND_ADDR = f"tcp://0.0.0.0:{ZMQ_PORT}" #
 ZMQ_HOST_ADDR = os.getenv("ZMQ_HOST_ADDR") #
+
+log(f"Role '{ROLE}' detected. Forcing SDR connection to tunnel: {REMOTE_URL}")
+
 
 if ROLE == "worker": #
     if not ZMQ_HOST_ADDR: #
