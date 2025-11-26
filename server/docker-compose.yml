@@ -41,6 +41,11 @@ services:
       # - ./proxychains.conf:/app/proxychains.conf:ro
       - ./sshd_config:/app/sshd_config:ro
 
+
+    cap_add:
+      # Allow setting real-time thread priorities (fixes the "Operation not permitted" warning)
+      - SYS_NICE
+
     environment:
 
       ROLE: "all"
