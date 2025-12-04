@@ -21,6 +21,7 @@ services:
       - "2222:2222"
       # waterfall
       - "50351:50351"
+      - "5000:5000"
       # audio
       - "50350:50350"
       - "8002:8002"
@@ -49,16 +50,21 @@ services:
     environment:
 
       ROLE: "all"
+      # Set to "tunnel" (default) to connect to the SSH reverse tunnel (127.0.0.1:55132).
+      # Set to "direct" to connect directly to the address in SDR_REMOTE.
+      SDR_CONNECTION_TYPE: "tunnel"
+
+      WEBSOCKET_PORT: "5000"
 
       SDR_REMOTE: "127.0.0.1:55132"
       # REMOTE_PROT: "tcp"
       REMOTE_TIMEOUT_MS: "100000"
       CENTER: "104100000"
       SPAN_RATE: "2048000"
-      FFT_SIZE: "2048"
+      FFT_SIZE: "1024"
       AUD_RATE: "48000"
       GAIN_DB: "20"
-      CHUNK_MS: "20"
+      CHUNK_MS: "50"
       SOAPY_SDR_LOG_LEVEL: "INFO"
       PYTHONPATH: /usr/lib/python3/dist-packages
       LD_LIBRARY_PATH: /usr/lib
