@@ -1,32 +1,10 @@
 #!/usr/bin/env python3
 #
-# Core Cast Server - Main Application (Binary Waterfall Optimization)
+# Core Cast Server - Main Application (IPC Socket Fix)
 #
-# This script reads a `ROLE` environment variable to determine its function:
-#
-# 1. ROLE="controller":
-#    - Runs CoreSDR (connects to SDR).
-#    - Runs the Waterfall server (path /waterfall).
-#    - Publishes the I/Q stream to a *fixed* ZMQ port.
-#    - Polls all workers and serves a *total* listener count on port 8002.
-#
-# 2. ROLE="worker":
-#    - Connects to the Controller's ZMQ stream.
-#    - Runs the Audio server (path /audio) & spawns ClientRx blocks.
-#    - Enforces `MAX_CLIENTS` limit.
-#    - Runs a *local* metrics server on port 8001 (e.g., /metrics).
-#
-# 3. ROLE="all" (default):
-#    - Runs everything in one container.
-#    - Serves both /audio and /waterfall.
-#    - Runs *both* the local (8001) and public (8002) metrics servers.
-#
-
 import importlib, sys, time, os, random, asyncio, json, signal, itertools
 import numpy as np, websockets
 import httpx
-
-# --- NEW IMPORTS ---
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -67,7 +45,6 @@ SPAN_RATE  = env_int  ("SPAN_RATE",  2_048_000)
 FFT_SIZE   = env_int  ("FFT_SIZE",   1024)
 AUD_RATE   = env_int  ("AUD_RATE",   48_000)
 GAIN_DB    = env_float("GAIN_DB",    20.0)
-# INCREASED TO 50ms (20 FPS) to reduce CPU load further
 CHUNK_MS   = env_int  ("CHUNK_MS",   50)
 
 # --- Role and Scaling Configuration ---
@@ -88,34 +65,36 @@ if SDR_CONNECTION_TYPE == "direct":
 else:
     REMOTE_URL = "127.0.0.1:55132" # Default tunnel address
     log(f"✅ SDR Connection: TUNNEL mode. Connecting to SSH tunnel at {REMOTE_URL}")
-    if SDR_REMOTE_ENV and SDR_REMOTE_ENV != REMOTE_URL:
-        log(f"⚠️  WARNING: SDR_REMOTE is set to '{SDR_REMOTE_ENV}' but SDR_CONNECTION_TYPE is 'tunnel'.")
-        log(f"⚠️  Ignoring SDR_REMOTE. Set SDR_CONNECTION_TYPE=direct to use it.")
-# --- ▲▲▲ END SDR CONNECTION LOGIC ▲▲▲ ---
-
 
 # --- Soapy Remote Config ---
 REMOTE_PROT  = os.getenv("REMOTE_PROT", "tcp")
 REMOTE_TO_MS = env_int("REMOTE_TIMEOUT_MS", 8000)
 REMOTE_MTU   = os.getenv("REMOTE_MTU")
 
-# --- ZMQ Configuration ---
+# --- ZMQ Configuration (THE FIX) ---
 ZMQ_PORT = env_int("ZMQ_PORT", 5678)
-ZMQ_BIND_ADDR = f"tcp://0.0.0.0:{ZMQ_PORT}"
 ZMQ_HOST_ADDR = os.getenv("ZMQ_HOST_ADDR")
 
-# --- WebSocket Config ---
-WEBSOCKET_PORT = env_int("WEBSOCKET_PORT", 50350)
+if ROLE == "all":
+    # CRITICAL FIX: Use IPC (Unix Sockets) instead of TCP.
+    # Proxychains ignores IPC, so this audio data will stay local and NOT go down the tunnel.
+    ZMQ_BIND_ADDR = "ipc:///tmp/corecast_audio.ipc"
+    ZMQ_CONNECT_ADDR = ZMQ_BIND_ADDR
+    log(f"✅ ROLE=all: Using IPC socket for audio bypass: {ZMQ_BIND_ADDR}")
 
-log(f"Role '{ROLE}' detected. SDR connection: {SDR_CONNECTION_TYPE} @ {REMOTE_URL}")
-
-if ROLE == "worker":
+elif ROLE == "worker":
     if not ZMQ_HOST_ADDR:
         log("❌ FATAL: ROLE=worker but ZMQ_HOST_ADDR is not set!")
         sys.exit(1)
+    ZMQ_BIND_ADDR = f"tcp://0.0.0.0:{ZMQ_PORT}" # Not used by worker
     ZMQ_CONNECT_ADDR = ZMQ_HOST_ADDR
-else:
+
+else: # Controller
+    ZMQ_BIND_ADDR = f"tcp://0.0.0.0:{ZMQ_PORT}"
     ZMQ_CONNECT_ADDR = f"tcp://127.0.0.1:{ZMQ_PORT}"
+
+# --- WebSocket Config ---
+WEBSOCKET_PORT = env_int("WEBSOCKET_PORT", 50350)
 
 # --- Metrics API Configuration ---
 API_KEY = os.getenv("INTERNAL_API_KEY")
@@ -124,6 +103,8 @@ http_client = None
 
 if API_KEY and API_URL:
     log("✅ Metrics API enabled.")
+    # Note: If proxychains is active, this external HTTP request might fail if not excluded.
+    # However, since IPC fixed the critical audio loop, we can tolerate API failures if they occur.
     http_client = httpx.Client(
         headers={"X-API-Key": API_KEY, "Content-Type": "application/json"},
         timeout=5.0
@@ -157,8 +138,6 @@ try:
     DOCKER_CLIENT = docker.from_env() if docker else None
 except Exception as e:
     DOCKER_CLIENT = None
-    log(f"⚠️  Could not connect to Docker. Listener polling will be disabled. Err: {e}")
-
 
 # ───────── Rate Negotiation ─────────
 def hz_to_bin(hz: float) -> int:
@@ -202,7 +181,7 @@ def pick_working_rate(target:int) -> int:
         if _try_block_setrate(c): return c
     raise RuntimeError("No acceptable sample rate found")
 
-# ───────── CoreSDR Class (OPTIMIZED FOR BINARY) ─────────
+# ───────── CoreSDR Class ─────────
 class CoreSDR(gr.top_block):
     def __init__(self):
         super().__init__("core")
@@ -226,15 +205,13 @@ class CoreSDR(gr.top_block):
         self.start()
 
     def grab_fft(self):
-        # OPTIMIZED: Return numpy array (float32) instead of list
         data = self._sink.data()
         if not data: return None
-        # Zero-Copy Optimization: Use numpy to wrap the C++ vector
         frame = np.array(data[:FFT_SIZE], np.float32)
         self._sink.reset()
         return frame
 
-# ───────── ClientRx Class (UNCHANGED) ─────────
+# ───────── ClientRx Class ─────────
 class ClientRx(gr.top_block):
     _ids = itertools.count(1)
     def __init__(self, off_hz, mode, bw, sql):
@@ -243,7 +220,7 @@ class ClientRx(gr.top_block):
         self._build(); self.start()
     def _build(self):
         self.lock(); self.disconnect_all()
-        log(f"ZMQ SUB Source connecting to {ZMQ_CONNECT_ADDR}")
+        log(f"ClientRx connecting to ZMQ SUB: {ZMQ_CONNECT_ADDR}")
         zmq = zeromq.sub_source(gr.sizeof_gr_complex, 1, ZMQ_CONNECT_ADDR, 100, False, True)
         bw = max(10e3, min(180e3, self.bw or 200e3))
         taps = firdes.low_pass(1, SPAN_RATE, bw/2, bw/4)
@@ -344,7 +321,7 @@ class AudioSession:
             self.log_session_end()
             self.rx.close()
 
-# ───────── WfSession Class (OPTIMIZED FOR BINARY) ─────────
+# ───────── WfSession Class ─────────
 class WfSession:
     def __init__(self, ws):
         self.ws = ws
@@ -362,22 +339,12 @@ class WfSession:
 
     async def pump(self, core):
         while True:
-            # 1. Get RAW numpy array (Float32)
             line = core.grab_fft()
-
             if line is not None:
                 a,b = self._slice()
-
-                # 2. Slice and Convert to Bytes directly (Zero JSON overhead)
-                # Ensure it's float32 for client consistency
                 payload = line[a:b].astype(np.float32).tobytes()
-
-                try:
-                    await self.ws.send(payload)
-                except Exception:
-                    # Client disconnected
-                    break
-
+                try: await self.ws.send(payload)
+                except Exception: break
             await asyncio.sleep(CHUNK_MS/1000)
 
     async def run(self, core):
@@ -387,56 +354,34 @@ class WfSession:
 # --- Main WebSocket Handler ---
 async def main_ws_handler(ws, path, core, role):
     log(f"New WS connection from {ws.remote_address[0]} on path '{path}' (ROLE={role})")
-
     if path == "/audio":
-        if role in ("worker", "all"):
-            await audio_handler(ws, path, core)
-        else:
-            log(f"WS request for /audio denied: ROLE='{role}' does not serve audio.")
-            await ws.close(4003, "Audio service not available on this node (role=controller)")
-
+        if role in ("worker", "all"): await audio_handler(ws, path, core)
+        else: await ws.close(4003, "Audio service not available")
     elif path == "/waterfall":
-        if role in ("controller", "all"):
-            if core:
-                await wf_handler(ws, path, core)
-            else:
-                log(f"WS request for /waterfall failed: ROLE='{role}' but core is None.")
-                await ws.close(5000, "Waterfall service misconfigured (core is None)")
-        else:
-            log(f"WS request for /waterfall denied: ROLE='{role}' does not serve waterfall.")
-            await ws.close(4003, "Waterfall service not available on this node (role=worker)")
+        if role in ("controller", "all") and core: await wf_handler(ws, path, core)
+        else: await ws.close(5000, "Waterfall service misconfigured")
     else:
-        log(f"Connection from {ws.remote_address[0]} rejected: invalid path '{path}'")
-        await ws.close(4004, f"Invalid path. Use /audio or /waterfall.")
+        await ws.close(4004, f"Invalid path")
 
 # ───────── WebSocket Handlers ─────────
 async def audio_handler(ws, _p, core):
     first_packet_str = ""
     try:
         if MAX_CLIENTS > 0 and len(active_sessions) >= MAX_CLIENTS:
-            log(f"Connection from {ws.remote_address[0]} rejected: server full ({len(active_sessions)}/{MAX_CLIENTS})")
             await ws.close(4005, "server full"); return
 
         first_packet_str = await ws.recv()
         first = json.loads(first_packet_str)
 
-        if first.get("type") != "tune":
-            await ws.close(4000, "need tune"); return
-        if abs(first["freq"] - CENTER) > SPAN_RATE/2:
-            await ws.close(4001, "out of span"); return
+        if first.get("type") != "tune": await ws.close(4000, "need tune"); return
+        if abs(first["freq"] - CENTER) > SPAN_RATE/2: await ws.close(4001, "out of span"); return
 
         user_uuid = first.get("user_uuid")
         station_uuid = first.get("station_uuid")
-
-        if not user_uuid:
-            log(f"Connection from {ws.remote_address[0]}: user_uuid not provided. Stats will not be logged.")
-        if not station_uuid:
-            log(f"Connection from {ws.remote_address[0]}: station_uuid not provided. Stats will not be logged.")
-
         await AudioSession(ws, first, user_uuid, station_uuid).run()
 
     except websockets.ConnectionClosed: pass
-    except Exception as e: log(f"Audio handler error: {e}. Packet: '{first_packet_str}'")
+    except Exception as e: log(f"Audio handler error: {e}")
 
 async def wf_handler(ws, _p, core):
     try: await WfSession(ws,).run(core)
@@ -447,9 +392,7 @@ async def wf_handler(ws, _p, core):
 def poll_worker_metrics():
     global TOTAL_LISTENER_COUNT
     if not DOCKER_CLIENT:
-        log("Listener Poll: Docker client not initialized, poller thread exiting.")
         if ROLE == "all":
-            log("Listener Poll: Docker failed, but in 'all' mode. Will only report local count.")
             while True:
                 TOTAL_LISTENER_COUNT = len(active_sessions)
                 time.sleep(10)
@@ -457,163 +400,87 @@ def poll_worker_metrics():
 
     WORKER_SERVICE_NAME = os.getenv("WORKER_SERVICE_NAME", "corecast_worker")
     log(f"✅ Controller listener polling thread started. Watching service: {WORKER_SERVICE_NAME}")
-
     while True:
         total_clients = 0
         try:
-            tasks = DOCKER_CLIENT.api.tasks_list(
-                filters={'service': WORKER_SERVICE_NAME, 'desired-state': 'running'}
-            )
+            tasks = DOCKER_CLIENT.api.tasks_list(filters={'service': WORKER_SERVICE_NAME, 'desired-state': 'running'})
             for task in tasks:
-                if task['Status']['State'] != 'running' or not task.get('NetworksAttachments'):
-                    continue
+                if task['Status']['State'] != 'running' or not task.get('NetworksAttachments'): continue
                 for net in task['NetworksAttachments']:
                     if net.get('Addresses'):
                         ip = net['Addresses'][0].split('/')[0]
-                        url = f"http://{ip}:8001/metrics"
                         try:
-                            res = POLLING_HTTP_CLIENT.get(url)
-                            if res.status_code == 200:
-                                total_clients += res.json().get("client_count", 0)
+                            res = POLLING_HTTP_CLIENT.get(f"http://{ip}:8001/metrics")
+                            if res.status_code == 200: total_clients += res.json().get("client_count", 0)
                         except Exception: pass
                         break
-
-            if ROLE == "all":
-                total_clients += len(active_sessions)
-
+            if ROLE == "all": total_clients += len(active_sessions)
             TOTAL_LISTENER_COUNT = total_clients
-
         except Exception as e:
-            log(f"Listener Poll Error: {e}")
-            if ROLE == "all":
-                TOTAL_LISTENER_COUNT = len(active_sessions)
+            if ROLE == "all": TOTAL_LISTENER_COUNT = len(active_sessions)
         time.sleep(10)
 
 # ───────── Public-Facing HTTP Server ─────────
 class PublicMetricsHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Requested-With, X-XSRF-TOKEN')
-        self.end_headers()
-
+        self.send_response(204); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
     def do_GET(self):
         if self.path == '/total_listeners':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
+            self.send_response(200); self.send_header('Content-type', 'application/json'); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
             count = len(active_sessions) if ROLE == "all" else TOTAL_LISTENER_COUNT
             self.wfile.write(json.dumps({"total_count": count}).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found')
-
+        else: self.send_response(404); self.end_headers()
     def log_message(self, format, *args): return
 
 def start_public_metrics_server(port=8002):
-    try:
-        server = HTTPServer(('', port), PublicMetricsHandler)
-        log(f"✅ Public metrics server started on http://0.0.0.0:{port}")
-        server.serve_forever()
-    except Exception as e:
-        log(f"❌ FATAL: Public metrics server failed: {e}")
+    try: HTTPServer(('', port), PublicMetricsHandler).serve_forever()
+    except Exception as e: log(f"❌ FATAL: Public metrics server failed: {e}")
 
 # ───────── Local Metrics Server ─────────
 class MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/metrics':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            count = len(active_sessions)
-            self.wfile.write(json.dumps({"client_count": count}).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found')
+            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
+            self.wfile.write(json.dumps({"client_count": len(active_sessions)}).encode('utf-8'))
+        else: self.send_response(404); self.end_headers()
     def log_message(self, format, *args): return
 
 def start_metrics_server(port=8001):
-    try:
-        server = HTTPServer(('', port), MetricsHandler)
-        log(f"✅ Metrics server started on http://0.0.0.0:{port}")
-        server.serve_forever()
-    except Exception as e:
-        log(f"❌ FATAL: Metrics server failed to start: {e}")
-
-# ───────── dump_env ─────────
-def dump_env():
-    keys = [
-        "SDR_CONNECTION_TYPE", "SDR_REMOTE",
-        "REMOTE_PROT", "REMOTE_TIMEOUT_MS", "SPAN_RATE", "CENTER",
-        "FFT_SIZE", "AUD_RATE", "GAIN_DB", "CHUNK_MS", "REMOTE_MTU",
-        "METRICS_API_URL", "ROLE", "MAX_CLIENTS", "ZMQ_PORT", "ZMQ_HOST_ADDR",
-        "WEBSOCKET_PORT", "WORKER_SERVICE_NAME"
-    ]
-    env_vars = {k: os.getenv(k) for k in keys}
-    env_vars["METRICS_ENABLED"] = "True" if (API_KEY and API_URL) else "False"
-    jlog("env", **env_vars)
+    try: HTTPServer(('', port), MetricsHandler).serve_forever()
+    except Exception as e: log(f"❌ FATAL: Metrics server failed to start: {e}")
 
 # ───────── main() ─────────
 async def main():
-    dump_env()
     log(f"--- Starting Core Cast Server in ROLE='{ROLE}' ---")
-
     core = None
     tasks = []
     start_ws_server = False
 
     if ROLE in ("controller", "all"):
         if os.getenv("DIAG", "0").lower() in ("1", "true", "yes"):
-            try: _ = pick_working_rate(SPAN_RATE); log("[diag] SUCCESS: a rate works"); sys.exit(0)
-            except Exception as e: log("[diag] FAILURE:", e); sys.exit(2)
+            try: _ = pick_working_rate(SPAN_RATE); sys.exit(0)
+            except Exception: sys.exit(2)
 
         log("Starting CoreSDR...")
         core = CoreSDR()
         log(f"Remote SDR @ {REMOTE_URL} ({SDR_CONNECTION_TYPE}) tuned {CENTER/1e6:.3f} MHz. ZMQ_BIND={ZMQ_BIND_ADDR}")
 
-        log("Starting public metrics server (port 8002)...")
-        public_metrics_thread = threading.Thread(target=start_public_metrics_server, args=(8002,), daemon=True)
-        public_metrics_thread.start()
-        tasks.append(asyncio.to_thread(public_metrics_thread.join))
-
-        if ROLE == "controller":
-            log("Starting worker polling thread...")
-            polling_thread = threading.Thread(target=poll_worker_metrics, daemon=True)
-            polling_thread.start()
-            tasks.append(asyncio.to_thread(polling_thread.join))
-
-        if ROLE == "all":
-            log("ROLE='all' detected, adding 2s delay for ZMQ to bind...")
-            await asyncio.sleep(2.0)
-            log("Delay complete, starting audio services.")
-
+        threading.Thread(target=start_public_metrics_server, args=(8002,), daemon=True).start()
+        if ROLE == "controller": threading.Thread(target=poll_worker_metrics, daemon=True).start()
+        if ROLE == "all": await asyncio.sleep(2.0)
         start_ws_server = True
 
     if ROLE in ("worker", "all"):
-        log("Starting local metrics server (port 8001)...")
-        metrics_thread = threading.Thread(target=start_metrics_server, args=(8001,), daemon=True)
-        metrics_thread.start()
-        tasks.append(asyncio.to_thread(metrics_thread.join))
-
+        threading.Thread(target=start_metrics_server, args=(8001,), daemon=True).start()
         start_ws_server = True
 
     if start_ws_server:
         log(f"Starting consolidated WebSocket Server (port {WEBSOCKET_PORT})...")
-        ws_srv = await websockets.serve(
-            lambda ws, p: main_ws_handler(ws, p, core, ROLE),
-            "", WEBSOCKET_PORT, max_size=None
-        )
+        ws_srv = await websockets.serve(lambda ws, p: main_ws_handler(ws, p, core, ROLE), "", WEBSOCKET_PORT, max_size=None)
         tasks.append(ws_srv.serve_forever())
         log(f"🚀  ws://<host>:{WEBSOCKET_PORT}/ (serving paths based on ROLE='{ROLE}')")
 
-    if not tasks:
-        log(f"❌ FATAL: Unknown ROLE='{ROLE}'. No services started.")
-        sys.exit(1)
-
+    if not tasks: sys.exit(1)
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
