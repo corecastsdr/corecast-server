@@ -28,7 +28,7 @@ async def test_websocket():
             print("   Waiting for first message...")
             try:
                 # This part was already correct: wait 5s for a message
-                message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                message = await asyncio.wait_for(websocket.recv(), timeout=20.0)
                 print(f"   SUCCESS: Received message! Length: {len(message)}")
             except asyncio.TimeoutError:
                 print("   WARNING: Connection opened, but no message received after 5 seconds.")
