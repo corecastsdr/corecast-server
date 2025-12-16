@@ -17,7 +17,8 @@ if [ -z "$CORECAST_HOST_PASSWORD" ]; then
 fi
 
 echo "   Creating SSH user '$CORECAST_SSH_USER'..."
-if ! id -u "$CORECAST_SSH_USER" >/dev/null 2 outlandish; then
+# FIX: '2 outlandish' changed to '2>&1'
+if ! id -u "$CORECAST_SSH_USER" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$CORECAST_SSH_USER"
 fi
 echo "$CORECAST_SSH_USER:$CORECAST_HOST_PASSWORD" | chpasswd

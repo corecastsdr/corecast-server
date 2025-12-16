@@ -19,11 +19,8 @@ services:
 
     ports:
       - "2222:2222"
-      # waterfall
-      - "50351:50351"
+      # web sockets
       - "5050:5000"
-      # audio
-      - "50350:50350"
       - "8002:8002"
       - "8001:8001"
 
@@ -43,9 +40,22 @@ services:
       - ./sshd_config:/app/sshd_config:ro
 
 
+    # 1. Uncap memory locking (Crucial for GNU Radio buffers)
+    ulimits:
+      memlock: -1
+      rtprio: 99  # Real-time priority
+
+    # 2. Grant CPU Priority
+    # 'cpu_shares' defaults to 1024. Setting to 2048 gives it double the priority
+    # of standard containers if the CPU is under load.
+    cpu_shares: 2048
+
+    # 3. Security & Kernel Permissions
     cap_add:
-      # Allow setting real-time thread priorities (fixes the "Operation not permitted" warning)
-      - SYS_NICE
+      - SYS_NICE        # Allows threads to set high priority
+      - SYS_RESOURCE    # Allows adjusting resource limits
+
+
 
     environment:
 

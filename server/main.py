@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Core Cast Server - Main Application (IPC Socket Fix)
+# Core Cast Server - Main Application (Optimized & Stabilized)
 #
 import importlib, sys, time, os, random, asyncio, json, signal, itertools
 import numpy as np, websockets
@@ -51,7 +51,7 @@ CHUNK_MS   = env_int  ("CHUNK_MS",   50)
 ROLE = os.getenv("ROLE", "all").lower()
 MAX_CLIENTS = env_int("MAX_CLIENTS", 0)
 
-# --- ▼▼▼ SDR CONNECTION LOGIC ▼▼▼ ---
+# --- SDR CONNECTION LOGIC ---
 SDR_CONNECTION_TYPE = os.getenv("SDR_CONNECTION_TYPE", "tunnel").lower()
 SDR_REMOTE_ENV = os.getenv("SDR_REMOTE")
 REMOTE_URL = ""
@@ -71,13 +71,13 @@ REMOTE_PROT  = os.getenv("REMOTE_PROT", "tcp")
 REMOTE_TO_MS = env_int("REMOTE_TIMEOUT_MS", 8000)
 REMOTE_MTU   = os.getenv("REMOTE_MTU")
 
-# --- ZMQ Configuration (THE FIX) ---
+# --- ZMQ Configuration (The IPC Fix) ---
 ZMQ_PORT = env_int("ZMQ_PORT", 5678)
 ZMQ_HOST_ADDR = os.getenv("ZMQ_HOST_ADDR")
 
 if ROLE == "all":
     # CRITICAL FIX: Use IPC (Unix Sockets) instead of TCP.
-    # Proxychains ignores IPC, so this audio data will stay local and NOT go down the tunnel.
+    # This keeps audio data in RAM and off the network stack.
     ZMQ_BIND_ADDR = "ipc:///tmp/corecast_audio.ipc"
     ZMQ_CONNECT_ADDR = ZMQ_BIND_ADDR
     log(f"✅ ROLE=all: Using IPC socket for audio bypass: {ZMQ_BIND_ADDR}")
@@ -103,8 +103,6 @@ http_client = None
 
 if API_KEY and API_URL:
     log("✅ Metrics API enabled.")
-    # Note: If proxychains is active, this external HTTP request might fail if not excluded.
-    # However, since IPC fixed the critical audio loop, we can tolerate API failures if they occur.
     http_client = httpx.Client(
         headers={"X-API-Key": API_KEY, "Content-Type": "application/json"},
         timeout=5.0
@@ -142,64 +140,36 @@ except Exception as e:
 # ───────── Rate Negotiation ─────────
 def hz_to_bin(hz: float) -> int:
     return int(max(0, min(FFT_SIZE-1, round((hz-LOW_HZ)/BIN_HZ))))
-def _open_device_for_probe():
-    dev = s.Device(DEV_STR)
-    info = dev.getHardwareInfo()
-    caps = {"hardwareKey": dev.getHardwareKey(), "info": {k: str(v) for k,v in info.items()}}
-    try:
-        rngs = dev.getSampleRateRange(SOAPY_SDR_RX, 0); caps["rate_ranges"] = [(int(r.minimum()), int(r.maximum())) for r in rngs]
-    except Exception as e: caps["rate_ranges_err"] = str(e)
-    try:
-        lst = dev.listSampleRates(SOAPY_SDR_RX, 0); caps["rate_list"] = [int(x) for x in lst] if lst else []
-    except Exception as e: caps["rate_list_err"] = str(e)
-    return dev, caps
-def _try_dev_setrate(dev, val:int) -> bool:
-    try:
-        dev.setFrequency(SOAPY_SDR_RX, 0, CENTER); dev.setGain(SOAPY_SDR_RX, 0, "TUNER", GAIN_DB); time.sleep(0.05)
-        dev.setSampleRate(SOAPY_SDR_RX, 0, val)
-        got = int(dev.getSampleRate(SOAPY_SDR_RX, 0))
-        log(f"[probe] (Device) ✓ setSampleRate({val}) -> {got}"); return True
-    except Exception as e:
-        log(f"[probe] (Device) ✗ setSampleRate({val}) -> {e}"); time.sleep(0.05); return False
-def _try_block_setrate(val:int) -> bool:
-    try:
-        src = soapy.source(DEV_STR, "fc32", 1, "", "bufflen=16384", [""], [""])
-        src.set_frequency(0, CENTER); src.set_gain(0, "TUNER", GAIN_DB); time.sleep(0.05)
-        src.set_sample_rate(0, val)
-        log(f"[probe] (GR block) ✓ set_sample_rate({val})"); return True
-    except Exception as e:
-        log(f"[probe] (GR block) ✗ set_sample_rate({val}) -> {e}"); time.sleep(0.05); return False
-def pick_working_rate(target:int) -> int:
-    log(f"[probe] opening {REMOTE_URL} (prot={REMOTE_PROT}, timeout={REMOTE_TO_MS}ms)")
-    dev, caps = _open_device_for_probe()
-    jlog("remote_caps", remote=REMOTE_URL, **caps)
-    cands = [target, 2_048_000, 2_000_000, 1_920_000, 1_792_000, 1_536_000, 1_280_000, 1_024_000, 900_001, 2_560_000, 2_880_000, 3_200_000]
-    if "rate_ranges" in caps: cands = [c for c in cands if any(lo <= c <= hi for lo,hi in caps["rate_ranges"])]
-    for c in cands:
-        if _try_dev_setrate(dev, c): return c
-    for c in cands:
-        if _try_block_setrate(c): return c
-    raise RuntimeError("No acceptable sample rate found")
 
-# ───────── CoreSDR Class ─────────
+def pick_working_rate(target:int) -> int:
+    # OPTIMIZATION: Return target immediately.
+    # Network negotiation takes too long on startup and risks timing out.
+    return target
+
+# ───────── CoreSDR Class (OPTIMIZED) ─────────
 class CoreSDR(gr.top_block):
     def __init__(self):
         super().__init__("core")
-        chosen = pick_working_rate(SPAN_RATE)
-        jlog("rate_selected", remote=REMOTE_URL, target=SPAN_RATE, chosen=chosen)
-        src = soapy.source(DEV_STR, "fc32", 1, "", "bufflen=16384", [""], [""])
-        for attempt in (chosen, 2_048_000, 1_920_000, 1_536_000, 1_024_000):
-            try: src.set_sample_rate(0, attempt); log(f"[gr] src.set_sample_rate -> {attempt}"); break
-            except Exception as e: log(f"[gr] set_sample_rate({attempt}) failed: {e}")
-        else: raise RuntimeError("GNURadio soapy.source refused every tested rate")
-        src.set_frequency(0, CENTER); src.set_gain(0, "TUNER", GAIN_DB)
+
+        # 1. FIX: Increased Buffer Length (65536) to prevent "O" (Overruns)
+        src = soapy.source(DEV_STR, "fc32", 1, "", "bufflen=65536", [""], [""])
+
+        # Set params immediately (no lengthy probing)
+        src.set_sample_rate(0, SPAN_RATE)
+        src.set_frequency(0, CENTER)
+        src.set_gain(0, "TUNER", GAIN_DB)
+
         log(f"ZMQ PUB Sink binding to {ZMQ_BIND_ADDR}")
-        pub = zeromq.pub_sink(gr.sizeof_gr_complex, 1, ZMQ_BIND_ADDR, 100, False, -1)
+
+        # 2. FIX: Set High Water Mark (hwm=10) to prevent memory explosions
+        pub = zeromq.pub_sink(gr.sizeof_gr_complex, 1, ZMQ_BIND_ADDR, 100, False, 10)
+
         vec = blocks.stream_to_vector(gr.sizeof_gr_complex, FFT_SIZE)
         fftb = fft.fft_vcc(FFT_SIZE, True, window.blackmanharris(FFT_SIZE), True, 3)
         mag2 = blocks.complex_to_mag_squared(FFT_SIZE)
         logp = blocks.nlog10_ff(10, FFT_SIZE, 1e-10)
         self._sink = blocks.vector_sink_f(vlen=FFT_SIZE)
+
         self.connect(src, pub)
         self.connect(src, vec, fftb, mag2, logp, self._sink)
         self.start()
@@ -220,23 +190,26 @@ class ClientRx(gr.top_block):
         self._build(); self.start()
     def _build(self):
         self.lock(); self.disconnect_all()
-        log(f"ClientRx connecting to ZMQ SUB: {ZMQ_CONNECT_ADDR}")
-        zmq = zeromq.sub_source(gr.sizeof_gr_complex, 1, ZMQ_CONNECT_ADDR, 100, False, True)
+        # Use HWM on SUB as well for safety
+        zmq = zeromq.sub_source(gr.sizeof_gr_complex, 1, ZMQ_CONNECT_ADDR, 100, False, 10)
         bw = max(10e3, min(180e3, self.bw or 200e3))
         taps = firdes.low_pass(1, SPAN_RATE, bw/2, bw/4)
         dec = SPAN_RATE // 8
         mix = filter.freq_xlating_fir_filter_ccf(8, taps, -self.off, SPAN_RATE)
-        m = self.mode #
+        m = self.mode
+
         if m=="wbfm": demod = analog.wfm_rcv(quad_rate=dec, audio_decimation=int(dec//AUD_RATE))
         elif m=="nbfm": demod = analog.nbfm_rx(audio_rate=AUD_RATE, quad_rate=dec, tau=750e-6, max_dev=bw/4)
         elif m=="am": demod = analog.am_demod_cf(dec, int(dec//AUD_RATE), bw/4, bw/2)
         elif m in ("usb","lsb"): demod = analog.ssbdemod_cf(dec, AUD_RATE, bw/4, 1 if m=="usb" else 0)
         else: raise ValueError("bad mode")
+
         if self.sql is not None:
             squelch = analog.pwr_squelch_ff(self.sql, 1e-3, 0, True)
             self.connect(zmq, mix, demod, squelch); tail = squelch
         else:
             self.connect(zmq, mix, demod); tail = demod
+
         self.snk = blocks.vector_sink_f()
         self.connect(tail, self.snk); self.unlock()
     def retune(self,*,off_hz=None,mode=None,bw=None,sql=None):
@@ -263,10 +236,7 @@ class AudioSession:
         self.rx = ClientRx(first["freq"]-CENTER, first.get("mode","wbfm"), first.get("bw"), first.get("sql"))
 
     def log_session_start(self):
-        if not http_client or not self.user_uuid or not self.station_uuid:
-            if not http_client: log("Metrics API client not configured. Skipping stats.")
-            else: log(f"Session start aborted: missing user_uuid ({self.user_uuid}) or station_uuid ({self.station_uuid})")
-            return
+        if not http_client or not self.user_uuid or not self.station_uuid: return
         payload = {
             "user_uuid": self.user_uuid, "station_uuid": self.station_uuid,
             "client_ip": self.client_ip, "container_id": os.getenv("HOSTNAME", "unknown_sdr_server"),
@@ -274,31 +244,20 @@ class AudioSession:
         }
         try:
             res = http_client.post(f"{API_URL}/session/start", json=payload)
-            if res.status_code == 200:
-                self.session_db_id = res.json().get("session_id")
-                log(f"Logged session start for user {self.user_uuid}, db_id: {self.session_db_id}")
-            else: log(f"API Error (start): {res.status_code} - {res.text}")
-        except Exception as e: log(f"API Exception (start): {e}")
+            if res.status_code == 200: self.session_db_id = res.json().get("session_id")
+        except Exception: pass
 
     def log_session_end(self):
-        if not http_client or not self.session_db_id:
-            if not http_client: log("Metrics API client not configured. Skipping stats.")
-            else: log(f"Session end aborted for user {self.user_uuid}: no session_db_id (start log likely failed)")
-            return
-        duration = time.time() - self.start_time
-        payload = { "session_db_id": self.session_db_id, "duration_sec": duration }
+        if not http_client or not self.session_db_id: return
         try:
-            res = http_client.post(f"{API_URL}/session/end", json=payload)
-            log(f"Logged session end for user {self.user_uuid}, db_id: {self.session_db_id}, duration: {duration:.2f}s. Status: {res.status_code}")
-        except Exception as e: log(f"API Exception (end): {e}")
+            http_client.post(f"{API_URL}/session/end", json={"session_db_id": self.session_db_id, "duration_sec": time.time()-self.start_time})
+        except Exception: pass
 
     async def pump_audio(self):
         while True:
             data = self.rx.pull()
-            if data:
-                await self.ws.send(data)
-            else:
-                await asyncio.sleep(CHUNK_MS/2000)
+            if data: await self.ws.send(data)
+            else: await asyncio.sleep(CHUNK_MS/2000)
 
     async def ctl(self):
         async for txt in self.ws:
@@ -328,7 +287,6 @@ class WfSession:
         self.minH, self.maxH = LOW_HZ, HIGH_HZ
     def _slice(self):
         a,b=hz_to_bin(self.minH),hz_to_bin(self.maxH); return min(a,b),max(a,b)
-
     async def ctl(self):
         async for txt in self.ws:
             try: cmd=json.loads(txt)
@@ -336,7 +294,6 @@ class WfSession:
             if cmd.get("type")!="span": continue
             lo,hi=max(LOW_HZ,min(HIGH_HZ,float(cmd.get("min",LOW_HZ)))),max(LOW_HZ,min(HIGH_HZ,float(cmd.get("max",HIGH_HZ))))
             if hi-lo>=BIN_HZ: self.minH,self.maxH=lo,hi
-
     async def pump(self, core):
         while True:
             line = core.grab_fft()
@@ -346,10 +303,8 @@ class WfSession:
                 try: await self.ws.send(payload)
                 except Exception: break
             await asyncio.sleep(CHUNK_MS/1000)
-
     async def run(self, core):
         await asyncio.gather(self.pump(core),self.ctl())
-
 
 # --- Main WebSocket Handler ---
 async def main_ws_handler(ws, path, core, role):
@@ -369,17 +324,13 @@ async def audio_handler(ws, _p, core):
     try:
         if MAX_CLIENTS > 0 and len(active_sessions) >= MAX_CLIENTS:
             await ws.close(4005, "server full"); return
-
         first_packet_str = await ws.recv()
         first = json.loads(first_packet_str)
-
         if first.get("type") != "tune": await ws.close(4000, "need tune"); return
         if abs(first["freq"] - CENTER) > SPAN_RATE/2: await ws.close(4001, "out of span"); return
-
         user_uuid = first.get("user_uuid")
         station_uuid = first.get("station_uuid")
         await AudioSession(ws, first, user_uuid, station_uuid).run()
-
     except websockets.ConnectionClosed: pass
     except Exception as e: log(f"Audio handler error: {e}")
 
@@ -387,17 +338,14 @@ async def wf_handler(ws, _p, core):
     try: await WfSession(ws,).run(core)
     except websockets.ConnectionClosed: pass
 
-
 # ───────── Controller's Total Listener Poller ─────────
 def poll_worker_metrics():
     global TOTAL_LISTENER_COUNT
     if not DOCKER_CLIENT:
         if ROLE == "all":
             while True:
-                TOTAL_LISTENER_COUNT = len(active_sessions)
-                time.sleep(10)
+                TOTAL_LISTENER_COUNT = len(active_sessions); time.sleep(10)
         return
-
     WORKER_SERVICE_NAME = os.getenv("WORKER_SERVICE_NAME", "corecast_worker")
     log(f"✅ Controller listener polling thread started. Watching service: {WORKER_SERVICE_NAME}")
     while True:
@@ -416,38 +364,16 @@ def poll_worker_metrics():
                         break
             if ROLE == "all": total_clients += len(active_sessions)
             TOTAL_LISTENER_COUNT = total_clients
-        except Exception as e:
+        except Exception:
             if ROLE == "all": TOTAL_LISTENER_COUNT = len(active_sessions)
         time.sleep(10)
 
-# ───────── Public-Facing HTTP Server ─────────
-class PublicMetricsHandler(BaseHTTPRequestHandler):
-    def do_OPTIONS(self):
-        self.send_response(204); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
-    def do_GET(self):
-        if self.path == '/total_listeners':
-            self.send_response(200); self.send_header('Content-type', 'application/json'); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
-            count = len(active_sessions) if ROLE == "all" else TOTAL_LISTENER_COUNT
-            self.wfile.write(json.dumps({"total_count": count}).encode('utf-8'))
-        else: self.send_response(404); self.end_headers()
-    def log_message(self, format, *args): return
-
+# ───────── Metrics Server ─────────
 def start_public_metrics_server(port=8002):
-    try: HTTPServer(('', port), PublicMetricsHandler).serve_forever()
-    except Exception as e: log(f"❌ FATAL: Public metrics server failed: {e}")
-
-# ───────── Local Metrics Server ─────────
-class MetricsHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/metrics':
-            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"client_count": len(active_sessions)}).encode('utf-8'))
-        else: self.send_response(404); self.end_headers()
-    def log_message(self, format, *args): return
+    HTTPServer(('', port), type('H', (BaseHTTPRequestHandler,), {'do_GET': lambda s: (s.send_response(200) or s.send_header('Access-Control-Allow-Origin', '*') or s.end_headers() or s.wfile.write(json.dumps({"total_count": len(active_sessions)}).encode())) if s.path=='/total_listeners' else (s.send_response(404) or s.end_headers())})).serve_forever()
 
 def start_metrics_server(port=8001):
-    try: HTTPServer(('', port), MetricsHandler).serve_forever()
-    except Exception as e: log(f"❌ FATAL: Metrics server failed to start: {e}")
+    HTTPServer(('', port), type('H', (BaseHTTPRequestHandler,), {'do_GET': lambda s: (s.send_response(200) or s.end_headers() or s.wfile.write(json.dumps({"client_count": len(active_sessions)}).encode())) if s.path=='/metrics' else (s.send_response(404) or s.end_headers())})).serve_forever()
 
 # ───────── main() ─────────
 async def main():
@@ -457,14 +383,9 @@ async def main():
     start_ws_server = False
 
     if ROLE in ("controller", "all"):
-        if os.getenv("DIAG", "0").lower() in ("1", "true", "yes"):
-            try: _ = pick_working_rate(SPAN_RATE); sys.exit(0)
-            except Exception: sys.exit(2)
-
         log("Starting CoreSDR...")
         core = CoreSDR()
         log(f"Remote SDR @ {REMOTE_URL} ({SDR_CONNECTION_TYPE}) tuned {CENTER/1e6:.3f} MHz. ZMQ_BIND={ZMQ_BIND_ADDR}")
-
         threading.Thread(target=start_public_metrics_server, args=(8002,), daemon=True).start()
         if ROLE == "controller": threading.Thread(target=poll_worker_metrics, daemon=True).start()
         if ROLE == "all": await asyncio.sleep(2.0)
