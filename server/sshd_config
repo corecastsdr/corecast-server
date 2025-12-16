@@ -9,9 +9,14 @@ PermitRootLogin no
 PermitEmptyPasswords no
 PubkeyAuthentication no
 
-# --- THIS IS THE KEY ---
-# We MUST allow TCP forwarding for the reverse proxy to work.
+# --- CRITICAL FOR PROXY ---
 AllowTcpForwarding yes
+GatewayPorts no
+
+# --- CRITICAL FOR STABILITY ---
+# Send a signal every 15 seconds to keep the tunnel alive
+ClientAliveInterval 15
+ClientAliveCountMax 3
 
 # Standard settings
 HostKey /app/host_keys/ssh_host_rsa_key

@@ -74,12 +74,12 @@ services:
       FFT_SIZE: "1024"
       AUD_RATE: "48000"
       GAIN_DB: "20"
-      CHUNK_MS: "50"
+      CHUNK_MS: "60"
       SOAPY_SDR_LOG_LEVEL: "INFO"
       PYTHONPATH: /usr/lib/python3/dist-packages
       LD_LIBRARY_PATH: /usr/lib
 
-      REMOTE_MTU: "1280"
+      REMOTE_MTU: "1200"
 
       MAX_CLIENTS: "10"
 

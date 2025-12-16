@@ -30,11 +30,19 @@ echo "   Found host keys in: /app/host_keys"
 echo "🔥 Starting SSH server in background..."
 /usr/sbin/sshd -D -e -f /app/sshd_config &
 
-# --- 2. Create Proxy Config ---
-echo "   Creating /tmp/proxy.conf for 127.0.0.1:8080"
-echo "[ProxyList]" > /tmp/proxy.conf
-echo "socks5 127.0.0.1 8080" >> /tmp/proxy.conf
-
+# --- 2. Create OPTIMIZED Proxy Config ---
+# We add timeouts here to prevent the "socket error" on DigitalOcean
+echo "   Creating optimized /tmp/proxy.conf..."
+cat <<EOF > /tmp/proxy.conf
+# Proxychains Configuration
+strict_chain
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+[ProxyList]
+socks5 127.0.0.1 8080
+EOF
 #
 # ▼▼▼ THIS IS THE FIX ▼▼▼
 #
