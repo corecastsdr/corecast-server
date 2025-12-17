@@ -38,8 +38,9 @@ cat <<EOF > /tmp/proxy.conf
 strict_chain
 proxy_dns
 remote_dns_subnet 224
-tcp_read_time_out 15000
-tcp_connect_time_out 8000
+tcp_read_time_out 30000
+tcp_connect_time_out 10000
+quiet_mode
 [ProxyList]
 socks5 127.0.0.1 8080
 EOF

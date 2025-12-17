@@ -56,6 +56,8 @@ SDR_CONNECTION_TYPE = os.getenv("SDR_CONNECTION_TYPE", "tunnel").lower()
 SDR_REMOTE_ENV = os.getenv("SDR_REMOTE")
 REMOTE_URL = ""
 
+
+
 if SDR_CONNECTION_TYPE == "direct":
     if not SDR_REMOTE_ENV:
         log("❌ FATAL: SDR_CONNECTION_TYPE=direct but SDR_REMOTE environment variable is not set!")
@@ -69,7 +71,8 @@ else:
 # --- Soapy Remote Config ---
 REMOTE_PROT  = os.getenv("REMOTE_PROT", "tcp")
 REMOTE_TO_MS = env_int("REMOTE_TIMEOUT_MS", 8000)
-REMOTE_MTU   = os.getenv("REMOTE_MTU")
+REMOTE_MTU   = os.getenv("REMOTE_MTU", "1024")
+REMOTE_WIN   = os.getenv("REMOTE_WINDOW", "65536")
 
 # --- ZMQ Configuration (The IPC Fix) ---
 ZMQ_PORT = env_int("ZMQ_PORT", 5678)
@@ -116,9 +119,10 @@ dev_parts = [
     f"remote=tcp://{REMOTE_URL}",
     f"remote:prot={REMOTE_PROT}",
     f"remote:timeout={REMOTE_TO_MS}",
+    f"remote:mtu={REMOTE_MTU}",       # Explicitly adding MTU
+    f"remote:window={REMOTE_WIN}",
 ]
-if REMOTE_MTU:
-    dev_parts.append(f"remote:mtu={REMOTE_MTU}")
+
 DEV_STR = ",".join(dev_parts)
 log(f"DEBUG: Attempting to connect with device string: {DEV_STR}")
 

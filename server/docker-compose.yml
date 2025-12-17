@@ -66,20 +66,42 @@ services:
 
       WEBSOCKET_PORT: "5000"
 
+      # --- CRITICAL STABILITY SETTINGS ---
+
+      # 1. BANDWIDTH: Lower to 1 MHz (1024000)
+      # 2.048 MHz requires ~32Mbps upload speed. 1.024 MHz requires ~16Mbps.
+      # Lowering this prevents the "Network Meltdown" that causes stuttering.
+      SPAN_RATE: "1024000"
+
+      # 2. PACKET SIZE (MTU): Set to 1024
+      # This forces packets to fit inside the SSH tunnel without splitting.
+      # This fixes the "Unconsumed payload" crash.
+      REMOTE_MTU: "1024"
+
+      # 3. BUFFER SIZE (Window): Set to 65536
+      # This creates a large buffer to absorb internet lag spikes.
+      REMOTE_WINDOW: "65536"
+
+      # 4. LATENCY: Increase to 100ms
+      # Gives the audio engine more time to process data before playing.
+      CHUNK_MS: "100"
+
+      # 5. TIMEOUT: Keep high (30s)
+      # Prevents the server from giving up during a lag spike.
+      REMOTE_TIMEOUT_MS: "30000"
+
+      # --- STANDARD SETTINGS ---
+
       SDR_REMOTE: "127.0.0.1:55132"
       # REMOTE_PROT: "tcp"
-      REMOTE_TIMEOUT_MS: "100000"
       CENTER: "104100000"
-      SPAN_RATE: "2048000"
       FFT_SIZE: "1024"
       AUD_RATE: "48000"
       GAIN_DB: "20"
-      CHUNK_MS: "60"
       SOAPY_SDR_LOG_LEVEL: "INFO"
       PYTHONPATH: /usr/lib/python3/dist-packages
       LD_LIBRARY_PATH: /usr/lib
 
-      REMOTE_MTU: "1200"
 
       MAX_CLIENTS: "10"
 
